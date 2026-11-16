@@ -1,0 +1,3 @@
+[submodule "uuob"]
+	path = uuob
+	url = https://github.com/UUOB/uuob.git
