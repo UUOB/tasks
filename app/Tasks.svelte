@@ -3,6 +3,8 @@
   import { flip } from 'svelte/animate';
   import { slide, fade } from 'svelte/transition';
   import Icon from '../uuob/ui/Icon.svelte';
+  import Settings from '../uuob/ui/Settings.svelte';
+  import TimeField from '../uuob/ui/TimeField.svelte';
   import { uuob } from '../uuob/ui/uuob.js';
   import { today, friendly, friendlyTime, parseQuick } from '../uuob/ui/dates.js';
 
@@ -29,6 +31,7 @@
   let openId = $state(null);
   let finishing = $state({}); // id -> true while the check animation plays
   let listSheet = $state(null); // { id?, name, color }
+  let settingsOpen = $state(false);
 
   const t = $derived(today());
   const smart = $derived([
@@ -205,6 +208,7 @@
     <button class="btn ghost add-list" onclick={() => (listSheet = { name: '', color: COLORS[lists.length % COLORS.length], created: Date.now() })}>
       <Icon name="plus" size={18} stroke={2.2} /> Add list
     </button>
+    <button class="btn ghost settings-btn" onclick={() => (settingsOpen = true)}><Icon name="settings" size={19} /> Settings</button>
   </aside>
 
   <section class="main scroll">
@@ -259,7 +263,7 @@
                 <textarea class="field" placeholder="Notes" value={x.notes ?? ''} onchange={(e) => save({ ...x, notes: e.target.value })}></textarea>
                 <div class="grid">
                   <label class="stack">Date<input class="field" type="date" value={x.due ?? ''} onchange={(e) => save({ ...x, due: e.target.value || null })} /></label>
-                  <label class="stack">Time<input class="field" type="time" value={x.time ?? ''} onchange={(e) => save({ ...x, time: e.target.value || null })} /></label>
+                  <label class="stack">Time<TimeField optional placeholder="None" bind:value={() => x.time, (v) => v !== x.time && save({ ...x, time: v })} /></label>
                   <label class="stack">List
                     <select class="field" value={x.list ?? ''} onchange={(e) => move(x, e.target.value)}>
                       <option value="">None</option>
@@ -287,6 +291,8 @@
     {/if}
   </section>
 </div>
+
+<Settings bind:open={settingsOpen} name="Tasks" />
 
 {#if listSheet?.from}
   <div class="scrim" onclick={(e) => e.target === e.currentTarget && (listSheet = null)} role="presentation">
@@ -338,7 +344,9 @@
   .center { text-align: center; }
   .check:disabled { opacity: 0.45; cursor: default; }
   .app { display: flex; height: 100vh; }
-  .sidebar { width: 290px; flex: none; padding: 28px 16px; border-right: 1px solid var(--line); background: var(--bg-elevated); }
+  .sidebar { width: 290px; flex: none; padding: 28px 16px 18px; border-right: 1px solid var(--line); background: var(--bg-elevated); display: flex; flex-direction: column; }
+  .settings-btn { margin-top: auto; align-self: flex-start; padding: 0 10px; color: var(--text-2); }
+  .settings-btn:hover { color: var(--text); background: var(--hover); }
   .smart { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .smart-tile {
     display: grid; grid-template-columns: auto 1fr; grid-template-rows: auto auto; align-items: center; gap: 8px 6px;
@@ -361,7 +369,7 @@
   .list-row.on { background: var(--active); }
   .list-row .name { flex: 1; font-weight: 500; }
   .hint { padding: 0 8px; margin: 0 0 6px; }
-  .add-list { margin-top: 8px; padding: 0 10px; }
+  .add-list { margin-top: 8px; padding: 0 10px; align-self: flex-start; }
 
   .main { flex: 1; padding: 40px 48px 80px; min-width: 0; }
   .main > * { max-width: 760px; margin-left: auto; margin-right: auto; }
