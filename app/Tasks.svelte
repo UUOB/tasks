@@ -6,7 +6,7 @@
   import Settings from '../uuob/ui/Settings.svelte';
   import TimeField from '../uuob/ui/TimeField.svelte';
   import { uuob } from '../uuob/ui/uuob.js';
-  import { today, friendly, friendlyTime, parseQuick } from '../uuob/ui/dates.js';
+  import { today, addDays, friendly, friendlyTime, parseQuick } from '../uuob/ui/dates.js';
 
   // Every list is a container of its own, so it can be shared with other
   // people. Tasks that belong to no list live in the app's first container.
@@ -32,6 +32,11 @@
   let finishing = $state({}); // id -> true while the check animation plays
   let listSheet = $state(null); // { id?, name, color }
   let settingsOpen = $state(false);
+  const prefsC = uuob.collection('prefs'); // synced preferences, in our own container
+  let alertsOn = $state(true); // ring at a task's time (on your phones, by UUOB)
+  let alertsKnown = $state(false);
+  let tasksKnown = $state(false); // every list has delivered its tasks
+  let hourTick = $state(0); // moves the coming-up window on
 
   const t = $derived(today());
   const smart = $derived([
@@ -172,12 +177,47 @@
     mobileList = true;
   }
 
+  // What is coming up, for UUOB's widget and alerts on your devices: each
+  // open task due by two weeks from now (also those already late), with an
+  // alert at its time if it has one. Written again whenever tasks or the
+  // setting change, and every hour, as the window moves on.
+  const DAYS = 14;
+  function upcoming() {
+    const last = addDays(today(), DAYS);
+    return tasks
+      .filter((x) => !x.done && x.due && x.due <= last)
+      .map((x) => ({
+        id: `${x.container}~${x.id}`,
+        date: x.due,
+        ...(x.time ? { time: x.time, ...(alertsOn ? { alert: 0 } : {}) } : {}),
+        title: x.title?.trim() || 'Task',
+        body: listOf(x)?.name || undefined,
+        color: listOf(x)?.color,
+      }));
+  }
+  $effect(() => {
+    if (!alertsKnown || !tasksKnown) return;
+    void hourTick;
+    const list = upcoming();
+    const t = setTimeout(() => uuob.upcoming(list).catch(() => {}), 1500);
+    return () => clearTimeout(t);
+  });
+  function setAlerts(on) {
+    alertsOn = on;
+    prefsC.put({ on }, 'alerts').catch(() => {});
+  }
+
   onMount(() => {
-    const a = uuob.all('tasks').subscribe((r) => (all = r));
+    const a = uuob.all('tasks').subscribe((r, complete) => ((all = r), (tasksKnown ||= complete)));
     const b = uuob.all('list').subscribe((r) => (infos = r));
     const c = uuob.containers.subscribe((r) => (containers = r));
+    const d = prefsC.subscribe((r) => {
+      alertsOn = r.find((x) => x.id === 'alerts')?.on ?? true;
+      alertsKnown = true;
+    });
+    const hourly = setInterval(() => hourTick++, 3600000);
     moveOldLists().catch(() => {});
-    return () => (a(), b(), c());
+    return () => (a(), b(), c(), d(), clearInterval(hourly));
   });
 </script>
 
@@ -292,7 +332,19 @@
   </section>
 </div>
 
-<Settings bind:open={settingsOpen} name="Tasks" />
+<Settings bind:open={settingsOpen} name="Tasks">
+  <div class="group-label">Alerts</div>
+  <div class="group">
+    <div class="srow">
+      <span class="label">At a task's time</span>
+      <div class="segmented" role="group" aria-label="Alerts at a task's time">
+        <button class:on={alertsOn} aria-pressed={alertsOn} onclick={() => setAlerts(true)}>On</button>
+        <button class:on={!alertsOn} aria-pressed={!alertsOn} onclick={() => setAlerts(false)}>Off</button>
+      </div>
+    </div>
+  </div>
+  <p class="foot">For tasks with a time. UUOB rings them on your phones and computers.</p>
+</Settings>
 
 {#if listSheet?.from}
   <div class="scrim" onclick={(e) => e.target === e.currentTarget && (listSheet = null)} role="presentation">
