@@ -1,15 +1,35 @@
 # Tasks
 
-**Tasks, kept in your own UUOB.**
+**Simple to-do lists, kept on your own devices.**
 
-Tasks has no server of its own. It keeps your tasks in [UUOB](https://github.com/UUOB/uuob), on your own
-devices, end-to-end encrypted, and UUOB syncs them between your devices. Install UUOB on the same device,
-or use the UUOB on another of your devices: there, choose *Apps → Connect with a code* and type the code
-into Tasks.
+**[Download](https://github.com/jachymri/uuob-releases)** for Android and Mac · Built for **[UUOB](https://github.com/UUOB/uuob)**
 
-Downloads for Android and Mac: **[github.com/jachymri/uuob-releases](https://github.com/jachymri/uuob-releases)**.
+## Built for UUOB
 
-## Layout
+Tasks has no server and no account. Your tasks live in [UUOB](https://github.com/UUOB/uuob), on your own
+devices. They are end-to-end encrypted, so only your devices (and people you share with) can read them, and
+UUOB keeps them in sync.
+
+1. Install UUOB, then Tasks.
+2. Open Tasks. UUOB asks *"Tasks wants to use your network"*. Tap **Allow**.
+3. Your tasks are now on all your linked devices.
+
+No UUOB on this device? In UUOB on another device choose **Apps → Connect with a code**, and type the code
+into Tasks. [Full setup guide →](https://github.com/UUOB/uuob/blob/main/docs/setup.md)
+
+## Features
+
+- **Lists**: Home, Work, Groceries, each with its own colour.
+- **Today, Upcoming, All, Completed**
+- **Quick add**: type "call mom fri 5pm" and the date and time are set for you.
+- **Dates, times and notes**
+- **Alerts** at a task's time, on your phone and computer.
+- **Share a list** with someone, so they can view it or edit it.
+- **Shows in Calendar**, if you allow it.
+- **Up next widget** on Android, together with your events.
+- **Works offline**: changes are sent when UUOB is reachable again.
+
+## For developers
 
 ```
 app/             the app (Svelte) and its shell (Tauri v2, in app/src-tauri)
@@ -17,8 +37,6 @@ uuob/            UUOB's repository, as a git submodule: the app SDK (uuob/ui/uuo
                  uuob/crates/uuob-sdk), the connect screen and design tokens (uuob/ui),
                  in-app updates (uuob/crates/uuob-update) and the build scripts (uuob/docker)
 ```
-
-## Develop
 
 ```bash
 git clone --recurse-submodules https://github.com/UUOB/tasks.git && cd tasks
@@ -34,7 +52,7 @@ gh workflow run mac.yml                              # the Mac app, built on Git
 ```
 
 To publish a new version, raise `version` in `app/src-tauri/tauri.conf.json`, commit, push and run
-`uuob/docker/release.sh` (see UUOB's README, *Updates*).
+`uuob/docker/release.sh` (see [UUOB for developers](https://github.com/UUOB/uuob/blob/main/docs/developers.md), *Updates*).
 
 To use a newer UUOB SDK: `git -C uuob pull origin main`, then commit the `uuob` folder.
 
