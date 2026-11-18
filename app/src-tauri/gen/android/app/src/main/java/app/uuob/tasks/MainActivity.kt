@@ -1,6 +1,9 @@
 package app.uuob.tasks
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.os.Build
 import android.graphics.Color
 import android.os.Bundle
 import android.webkit.WebView
@@ -18,6 +21,10 @@ class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+    // Alerts are this app's own notifications; Android 13+ shows them only once allowed.
+    if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+      requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+    }
 
     // Keep the web UI clear of the status bar, gesture bar and cutouts, and
     // paint the space behind them in the app's background colour.

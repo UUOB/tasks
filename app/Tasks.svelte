@@ -33,7 +33,7 @@
   let listSheet = $state(null); // { id?, name, color }
   let settingsOpen = $state(false);
   const prefsC = uuob.collection('prefs'); // synced preferences, in our own container
-  let alertsOn = $state(true); // ring at a task's time (on your phones, by UUOB)
+  let alertsOn = $state(true); // ring at a task's time (as Tasks' notification; UUOB keeps the time)
   let alertsKnown = $state(false);
   let tasksKnown = $state(false); // every list has delivered its tasks
   let hourTick = $state(0); // moves the coming-up window on
@@ -177,7 +177,7 @@
     mobileList = true;
   }
 
-  // What is coming up, for UUOB's widget and alerts on your devices: each
+  // What is coming up, for alerts on your devices: each
   // open task due by two weeks from now (also those already late), with an
   // alert at its time if it has one. Written again whenever tasks or the
   // setting change, and every hour, as the window moves on.
@@ -343,7 +343,7 @@
       </div>
     </div>
   </div>
-  <p class="foot">For tasks with a time. UUOB rings them on your phones and computers.</p>
+  <p class="foot">For tasks with a time. They ring on your phones and computers, as Tasks notifications.</p>
 </Settings>
 
 {#if listSheet?.from}
