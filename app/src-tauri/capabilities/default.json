@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Four native abilities: open UUOB (uuob://) so the user can allow the connection, find UUOB (here or on another device), update the app itself, and read its own version to show it in Settings.",
+  "description": "Five native abilities: open UUOB (uuob://) so the user can allow the connection, find UUOB (here or on another device), update the app itself, read its own version to show it in Settings, and its own package name, which UUOB on Android needs to hand it its alerts.",
   "windows": [
     "main"
   ],
@@ -16,6 +16,7 @@
     },
     "uuob-update:default",
     "uuob-sdk:default",
-    "core:app:allow-version"
+    "core:app:allow-version",
+    "core:app:allow-identifier"
   ]
 }

@@ -12,12 +12,12 @@ import androidx.core.app.NotificationCompat
  * Shows an alert as Tasks's own notification. UUOB keeps the time (it runs
  * all along and learns of changes made on other devices) and, when an alert
  * is due, hands it here: extras `key` (tells alerts apart), `title` and
- * `text` ("9:30–10:00 · Room 2"). Only UUOB can send it: both apps are
- * signed alike and the broadcast needs `app.uuob.permission.UPCOMING`.
+ * `text` ("9:30–10:00 · Room 2"). Anyone can send a broadcast here, so it
+ * counts only when it comes from UUOB (`fromUuob`).
  */
 class AlertReceiver : BroadcastReceiver() {
   override fun onReceive(ctx: Context, intent: Intent) {
-    if (intent.action != "app.uuob.SHOW_ALERT") return
+    if (intent.action != "app.uuob.SHOW_ALERT" || !fromUuob(intent)) return
     val key = intent.getStringExtra("key") ?: return
     val nm = ctx.getSystemService(NotificationManager::class.java)
     nm.createNotificationChannel(NotificationChannel("alerts", "Alerts", NotificationManager.IMPORTANCE_HIGH))
@@ -35,3 +35,10 @@ class AlertReceiver : BroadcastReceiver() {
     nm.notify(key.hashCode(), n)
   }
 }
+
+
+/** Did UUOB send this? Its `from` extra is a PendingIntent, and Android itself
+ *  says which app created that one. Only apps the user allowed in UUOB are ever
+ *  given one, so every other app is kept out (an allowed app could pass one on). */
+@Suppress("DEPRECATION")
+fun fromUuob(intent: Intent) = intent.getParcelableExtra<PendingIntent>("from")?.creatorPackage == "app.uuob"

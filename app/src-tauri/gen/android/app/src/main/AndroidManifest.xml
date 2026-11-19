@@ -3,12 +3,6 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Alerts are this app's own notifications (Alert.kt). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- UUOB hands this app its alerts when due (Alert.kt). Only apps signed
-         like UUOB hold this. -->
-    <permission
-        android:name="app.uuob.permission.UPCOMING"
-        android:protectionLevel="signature" />
-    <uses-permission android:name="app.uuob.permission.UPCOMING" />
     <!-- So this app can open UUOB (uuob://) for the user to allow the connection. -->
     <queries>
         <intent>
@@ -43,8 +37,7 @@
         <!-- UUOB handing over an alert when it is due, shown as this app's own notification (Alert.kt). -->
         <receiver
             android:name=".AlertReceiver"
-            android:exported="true"
-            android:permission="app.uuob.permission.UPCOMING">
+            android:exported="true">
             <intent-filter>
                 <action android:name="app.uuob.SHOW_ALERT" />
             </intent-filter>
