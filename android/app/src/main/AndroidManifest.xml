@@ -11,6 +11,8 @@
             <action android:name="android.intent.action.VIEW" />
             <data android:scheme="uuob" />
         </intent>
+        <!-- To ask UUOB whether the server on its port is really it (the SDK's Prover). -->
+        <package android:name="app.uuob" />
     </queries>
 
     <application
