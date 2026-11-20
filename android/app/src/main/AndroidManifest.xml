@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Alerts are this app's own notifications (AlertReceiver). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- The update button hands a downloaded update to the system installer. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- So this app can open UUOB (uuob://) for the user to allow the connection. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="uuob" />
+        </intent>
+    </queries>
+
+    <application
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:theme="@android:style/Theme.Material.NoActionBar"
+        android:networkSecurityConfig="@xml/network_security_config">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|screenLayout|uiMode"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- UUOB handing over an alert when it is due. Anyone can send it, so it
+             counts only with UUOB's `from` (UuobAlerts.fromUuob). -->
+        <receiver android:name=".AlertReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="app.uuob.SHOW_ALERT" />
+            </intent-filter>
+        </receiver>
+        <receiver android:name="app.uuob.kit.UpdateReceiver" android:exported="false" />
+    </application>
+</manifest>

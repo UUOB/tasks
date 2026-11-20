@@ -1,0 +1,5 @@
+[bindings.kotlin]
+package_name = "app.uuob.tasks.core"
+
+[bindings.swift]
+module_name = "TasksCore"

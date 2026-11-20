@@ -31,30 +31,37 @@ into Tasks. [Full setup guide →](https://github.com/UUOB/uuob/blob/main/docs/s
 
 ## For developers
 
+Tasks is native on each system, over one Rust core, like UUOB itself:
+
 ```
-app/             the app (Svelte) and its shell (Tauri v2, in app/src-tauri)
-uuob/            UUOB's repository, as a git submodule: the app SDK (uuob/ui/uuob.js and
-                 uuob/crates/uuob-sdk), the connect screen and design tokens (uuob/ui),
-                 in-app updates (uuob/crates/uuob-update) and the build scripts (uuob/docker)
+core/            Tasks without its screens (Rust): its data, rules and the calls to UUOB, for all three
+                 systems; Swift and Kotlin reach it through UniFFI
+android/         the Android app (Jetpack Compose, Material 3)
+mac/             the Mac app (SwiftUI, macOS 14 or newer)
+linux/           the Linux app (GTK 4 and Libadwaita 1.5, through Relm4)
+sdk/             UUOB's SDK for apps, as a git submodule (UUOB-sdk): the client (sdk/client) and the
+                 controls and connect screen every app shares (sdk/kit: android, mac, linux)
+uuob/            UUOB's repository, as a git submodule: the build scripts (uuob/docker)
+app/             the earlier web version (Svelte in Tauri), kept until the native one replaces it
 ```
 
 ```bash
 git clone --recurse-submodules https://github.com/UUOB/tasks.git && cd tasks
 ```
 
-Everything runs in UUOB's dev container (`uuob/docker/dev.sh` builds it on first use):
+Everything builds in UUOB's containers (`uuob/docker`; each builds its image on first use):
 
 ```bash
-uuob/docker/dev.sh sh -c 'npm ci && npm run build'   # the front end
-uuob/docker/dev.sh cargo build                       # the desktop app (Linux)
-uuob/docker/android.sh uuob/docker/apk.sh            # a signed APK for arm64 phones, in dist/
-gh workflow run mac.yml                              # the Mac app, built on GitHub
+uuob/docker/linux.sh cargo build -p tasks-linux     # the Linux app, target/debug/uuob-tasks
+uuob/docker/linux.sh cargo test                       # the core's tests
+uuob/docker/android.sh uuob/docker/apk.sh             # a signed APK for arm64 phones, in dist/
+gh workflow run mac.yml                               # the Mac app, built on GitHub (or mac/build.sh on a Mac)
 ```
 
-To publish a new version, raise `version` in `app/src-tauri/tauri.conf.json`, commit, push and run
-`uuob/docker/release.sh` (see [UUOB for developers](https://github.com/UUOB/uuob/blob/main/docs/developers.md), *Updates*).
+To publish a new version, raise `version` in `Cargo.toml`, commit, push and run `uuob/docker/release.sh`
+(see [UUOB for developers](https://github.com/UUOB/uuob/blob/main/docs/developers.md), *Updates*).
 
-To use a newer UUOB SDK: `git -C uuob pull origin main`, then commit the `uuob` folder.
+To use a newer SDK or UUOB: `git -C sdk pull origin main` (or `uuob`), then commit that folder.
 
 ## License
 

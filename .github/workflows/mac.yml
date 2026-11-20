@@ -1,9 +1,7 @@
-# Builds this repository's app (the one in `app/`) for macOS, Apple silicon and
-# Intel. The same file serves UUOB and each app that uses it.
-# Run it from the Actions tab or with `gh workflow run mac.yml`; release.sh
-# does that when publishing a new version.
+# Builds Tasks for macOS (SwiftUI over the Rust core), Apple silicon and
+# Intel. Run it from the Actions tab or with `gh workflow run mac.yml`.
 # It leaves a .dmg (first install) and a .app.tar.gz (what the app's own
-# Update button installs, see crates/uuob-update).
+# Update button installs).
 name: macOS app
 on: workflow_dispatch
 jobs:
@@ -12,19 +10,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with: { submodules: true }
-      - uses: actions/setup-node@v7
-        with: { node-version: 22, cache: npm }
       - uses: dtolnay/rust-toolchain@stable
         with: { targets: "aarch64-apple-darwin,x86_64-apple-darwin" }
       - uses: Swatinem/rust-cache@v2
-      - run: npm ci
       - name: Build the app
-        run: |
-          bundle=target/universal-apple-darwin/release/bundle
-          (cd app && npx tauri build --target universal-apple-darwin --bundles app,dmg)
-          mkdir -p out
-          cp "$bundle"/dmg/*.dmg out/
-          (cd "$bundle/macos" && for a in *.app; do COPYFILE_DISABLE=1 tar -czf "$GITHUB_WORKSPACE/out/$a.tar.gz" "$a"; done)
-          ls -la out
+        run: mac/build.sh
       - uses: actions/upload-artifact@v7
         with: { name: mac, path: out/*, if-no-files-found: error }

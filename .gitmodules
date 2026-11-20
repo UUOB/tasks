@@ -1,3 +1,6 @@
 [submodule "uuob"]
 	path = uuob
 	url = https://github.com/UUOB/uuob.git
+[submodule "sdk"]
+	path = sdk
+	url = https://github.com/UUOB/sdk.git

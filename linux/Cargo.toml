@@ -1,0 +1,18 @@
+[package]
+name = "tasks-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tasks' window on Linux: GTK 4 and Libadwaita (Relm4), on Tasks' core and UUOB's SDK."
+
+[[bin]]
+name = "uuob-tasks"
+path = "src/main.rs"
+
+[dependencies]
+tasks-core = { path = "../core" }
+uuob-client = { path = "../sdk/client" }
+uuob-kit-gtk = { path = "../sdk/kit/linux" }
+# Libadwaita 1.5 (GNOME 46), as UUOB's own window.
+relm4 = { version = "0.11", features = ["libadwaita", "gnome_46"] }
+serde_json = "1"

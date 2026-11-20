@@ -1,0 +1,26 @@
+[package]
+name = "tasks-core"
+# Tasks' version: Android (build.gradle.kts), the Mac (mac/build.sh) and updates read it here.
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tasks without its screens: views, lists, quick add and what is coming up, on the UUOB SDK."
+
+[lib]
+name = "tasks_core"
+# Android and the Mac load it as a shared library; Linux links it.
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+# Writes the Kotlin and Swift bindings (UniFFI) from the built library.
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+uuob-client = { path = "../sdk/client" }
+uniffi = "0.32"
+serde_json = "1"
