@@ -42,7 +42,7 @@ private func coreScreen(_ state: String) -> String { screen(state: state) }
 private func coreUpcoming(_ state: String) -> String { upcoming(state: state) }
 
 /// A colour as the core names it ("gray" for All).
-func tint(_ name: String) -> Color { name == "gray" ? Color(light: 0x8e8e93, dark: 0x8e8e93) : Palette.color(name) }
+func listTint(_ name: String) -> Color { name == "gray" ? Color(light: 0x8e8e93, dark: 0x8e8e93) : Palette.color(name) }
 
 /// Tasks' state: every task, list and preference, kept live from UUOB. What
 /// the screen shows comes from the core (`screen`); this only reads, writes
@@ -327,7 +327,7 @@ struct SmartTile: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                Circled(icon: sm.icon.string, color: tint(sm.color.string), size: 30)
+                Circled(icon: sm.icon.string, color: listTint(sm.color.string), size: 30)
                 Spacer()
                 Text("\(sm.count.int)").font(.system(size: 24, weight: .bold))
             }
@@ -412,7 +412,7 @@ struct MainList: View {
                 .textFieldStyle(.plain).font(.system(size: 17)).focused($typing)
                 .onSubmit {
                     guard !draft.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-                    model.add(draft, list: list.id.str)
+                    model.add(draft, list: list.id)
                     draft = ""
                 }
             if !draft.trimmingCharacters(in: .whitespaces).isEmpty, let p = quickPreview(text: draft, hour12: model.settings.hour12) {
