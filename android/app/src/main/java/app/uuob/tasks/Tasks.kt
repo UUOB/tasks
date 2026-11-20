@@ -83,6 +83,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.uuob.kit.Btn
 import app.uuob.kit.BtnKind
+import app.uuob.kit.Accent
 import app.uuob.kit.Check
 import app.uuob.kit.Colors
 import app.uuob.kit.Empty
@@ -313,27 +314,30 @@ fun TasksScreen(model: TasksModel, updater: Updater) {
     runCatching { Uuob.client.upcoming(model.upcomingList()) }
   }
   val s = model.screen
+  // The list or view on screen lends its colour to everything in it: pluses, ticks, the field's edge.
+  val shown = s.optJSONObject("current")?.optString("color")
+  val accent = if (shown.isNullOrEmpty() || shown == "gray") MaterialTheme.colorScheme.primary else Colors.of(shown)
   BoxWithConstraints(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
     val wide = maxWidth >= 720.dp
     if (wide) {
       Row(Modifier.fillMaxSize()) {
         Box(Modifier.width(290.dp).fillMaxHeight().background(MaterialTheme.colorScheme.surface)) { Sidebar(model, s, wide, updater) }
         Box(Modifier.width(1.dp).fillMaxHeight().background(Tokens.line))
-        MainList(model, s, wide)
+        Accent(accent) { MainList(model, s, wide) }
       }
     } else {
       BackHandler(model.mobileList) { model.mobileList = false }
-      if (model.mobileList) MainList(model, s, wide) else Sidebar(model, s, wide, updater)
+      if (model.mobileList) Accent(accent) { MainList(model, s, wide) } else Sidebar(model, s, wide, updater)
     }
   }
   if (model.settingsOpen) {
     SettingsSheet(onClose = { model.settingsOpen = false }) {
-      SettingsGroup("Alerts", "For tasks with a time. They ring on your phones and computers, as Tasks notifications.") {
+      SettingsGroup("Alerts") {
         SettingsRow("At a task's time") { Segmented(listOf("On", "Off"), if (model.alerts) 0 else 1) { model.changeAlerts(it == 0) } }
       }
     }
   }
-  model.listSheet?.let { ListSheet(model, it) }
+  model.listSheet?.let { sheet -> ListSheet(model, sheet) }
 }
 
 /** A colour as the core names it ("gray" is `--text-2`). */
@@ -367,8 +371,8 @@ private fun Sidebar(model: TasksModel, s: JSONObject, wide: Boolean, updater: Up
           val k by animateFloatAsState(if (pressed) 0.97f else 1f, label = "tile")
           Column(
             Modifier.weight(1f).scale(k).clip(RoundedCornerShape(14.dp))
-              .background(if (on) Tokens.accentSoft else MaterialTheme.colorScheme.surface)
-              .border(1.dp, if (on) MaterialTheme.colorScheme.primary.copy(alpha = 0.5f) else Tokens.line, RoundedCornerShape(14.dp))
+              .background(if (on) tint(sm.optString("color")).copy(alpha = if (Colors.dark) 0.16f else 0.12f) else MaterialTheme.colorScheme.surface)
+              .border(1.dp, if (on) tint(sm.optString("color")).copy(alpha = 0.5f) else Tokens.line, RoundedCornerShape(14.dp))
               .clickable(src, null) { model.go(sm.optString("id")) }.padding(12.dp),
           ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -388,7 +392,7 @@ private fun Sidebar(model: TasksModel, s: JSONObject, wide: Boolean, updater: Up
       val on = wide && model.view == l.optString("id")
       Row(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
-          .background(if (on) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f) else Color.Transparent)
+          .background(if (on) Colors.of(l.optString("color")).copy(alpha = if (Colors.dark) 0.16f else 0.12f) else Color.Transparent)
           .clickable { model.go(l.optString("id")) }.padding(8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -399,7 +403,6 @@ private fun Sidebar(model: TasksModel, s: JSONObject, wide: Boolean, updater: Up
         Text("${l.optInt("count")}", fontSize = 13.sp, color = Tokens.text2)
       }
     }
-    if (lists.isEmpty()) Text("Group tasks into lists like Home, Work or Groceries.", fontSize = 13.sp, color = Tokens.text2, modifier = Modifier.padding(horizontal = 8.dp).padding(bottom = 6.dp))
     Btn("Add list", { model.newList() }, Modifier.padding(top = 8.dp), kind = BtnKind.Ghost, icon = "plus")
    }
     Row(Modifier.clip(Pill.shape).clickable { model.settingsOpen = true }.padding(horizontal = 10.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -455,7 +458,7 @@ private fun MainList(model: TasksModel, s: JSONObject, wide: Boolean) {
         Box(Modifier.widthIn(max = 760.dp).fillMaxWidth().animateItem()) { TaskRow(model, x, s) }
       }
     }
-    s.optJSONObject("empty")?.let { e -> item(key = "empty") { Empty(e.optString("glyph"), e.optString("headline"), e.optString("caption"), Modifier.animateItem()) } }
+    s.optJSONObject("empty")?.let { e -> item(key = "empty") { Empty(e.optString("glyph"), e.optString("headline"), "", Modifier.animateItem()) } }
   }
 }
 
@@ -611,14 +614,15 @@ private fun ListSheet(model: TasksModel, start: JSONObject) {
   var color by remember(start) { mutableStateOf(start.optString("color", "blue")) }
   val id = start.text("id")
   val from = start.optJSONObject("from")
-  WebSheet({ model.listSheet = null }) {
+  // The sheet takes the colour being chosen, so the buttons show what the list will look like.
+  Accent(Colors.of(color)) { WebSheet({ model.listSheet = null }) {
     Box(Modifier.fillMaxWidth().padding(bottom = 18.dp), contentAlignment = Alignment.Center) {
       Box(Modifier.shadow(8.dp, CircleShape)) { Circle(Colors.of(color), 72, "list", 30, 2.4f) }
     }
     if (from != null) {
       Text(name, fontSize = 22.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
       Text(
-        "${from.optString("name")} shares this list with you. " + if (start.optBoolean("canWrite")) "You can both change it." else "You can view it, but not change it.",
+        "Shared by ${from.optString("name")}" + if (start.optBoolean("canWrite")) "" else " · view only",
         color = Tokens.text2, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
       )
       Row(Modifier.fillMaxWidth().padding(top = 22.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -653,5 +657,5 @@ private fun ListSheet(model: TasksModel, start: JSONObject) {
       else Btn("Cancel", { model.listSheet = null }, Modifier.weight(1f), lg = true)
       Btn(if (id != null) "Save" else "Create", { model.saveList(JSONObject(start.toString()).put("name", name).put("color", color)) }, Modifier.weight(1f), kind = BtnKind.Primary, lg = true, enabled = name.isNotBlank())
     }
-  }
+  }}
 }
