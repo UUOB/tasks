@@ -259,14 +259,11 @@ struct TasksView: View {
         .foregroundStyle(Look.text)
         .sheet(isPresented: $model.settingsOpen) {
             SettingsSheet(app: tasksApp, settings: model.settings) {
-                Card {
-                    Trailing("At a task's time") {
-                        Segmented([("on", "On"), ("off", "Off")], selected: model.alerts ? "on" : "off") { model.setAlerts($0 == "on") }
-                    }
-                } header: {
-                    SectionLabel("Alerts")
-                } footer: {
-                    Text("For tasks with a time. They ring on your phones and computers, as Tasks notifications.")
+                RowsLabel("Tasks")
+                IconRow("bell", last: true) {
+                    Text("Alerts at a task's time")
+                    Spacer(minLength: 8)
+                    Segmented([("on", "On"), ("off", "Off")], selected: model.alerts ? "on" : "off") { model.setAlerts($0 == "on") }
                 }
             }
         }

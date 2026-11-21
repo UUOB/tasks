@@ -332,8 +332,8 @@ fun TasksScreen(model: TasksModel, updater: Updater) {
   }
   if (model.settingsOpen) {
     SettingsSheet(onClose = { model.settingsOpen = false }) {
-      SettingsGroup("Alerts") {
-        SettingsRow("At a task's time") { Segmented(listOf("On", "Off"), if (model.alerts) 0 else 1) { model.changeAlerts(it == 0) } }
+      SettingsGroup("Tasks") {
+        SettingsRow("Alerts at a task's time", icon = "bell", last = true) { Segmented(listOf("On", "Off"), if (model.alerts) 0 else 1) { model.changeAlerts(it == 0) } }
       }
     }
   }
