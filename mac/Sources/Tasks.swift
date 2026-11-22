@@ -26,7 +26,8 @@ struct TasksApp: App {
     var body: some Scene {
         WindowGroup("Tasks") {
             Gate(uuob: model.uuob, updater: updater) { TasksView(model: model, updater: updater) }
-                .frame(minWidth: 620, minHeight: 560)
+                // Small windows work too: one column at a time, as on a phone.
+                .frame(minWidth: 360, minHeight: 420)
                 .background(Look.bg)
         }
         // No title bar: the sidebar and the list are the window, as on the web.
@@ -144,7 +145,11 @@ final class TasksModel {
     func go(_ id: String) {
         view = id
         openId = nil
+        listShown = true
     }
+
+    /// In a narrow window: the list on screen instead of the lists (as on a phone).
+    var listShown = false
 
     func add(_ text: String, list: String?) {
         let record = quickTask(text: text, view: view)
@@ -250,10 +255,19 @@ struct TasksView: View {
 
     var body: some View {
         let s = model.screen
-        HStack(spacing: 0) {
-            Sidebar(model: model, updater: updater, s: s).frame(width: 290)
-            Rectangle().fill(Look.line).frame(width: 1)
-            MainList(model: model, s: s)
+        GeometryReader { geo in
+            // A narrow window shows the lists, or one list with a way back (as on a phone).
+            if geo.size.width >= 700 {
+                HStack(spacing: 0) {
+                    Sidebar(model: model, updater: updater, s: s).frame(width: 290)
+                    Rectangle().fill(Look.line).frame(width: 1)
+                    MainList(model: model, s: s)
+                }
+            } else if model.listShown {
+                MainList(model: model, s: s, back: { model.listShown = false })
+            } else {
+                Sidebar(model: model, updater: updater, s: s)
+            }
         }
         .ignoresSafeArea(.container, edges: .top)
         .foregroundStyle(Look.text)
@@ -361,6 +375,8 @@ struct ListRow: View {
 struct MainList: View {
     @Bindable var model: TasksModel
     let s: J
+    /// Back to the lists, in a narrow window.
+    var back: (() -> Void)? = nil
     @State private var draft = ""
     @FocusState private var typing: Bool
 
@@ -370,7 +386,9 @@ struct MainList: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 8) {
+                    if let back { IconButton("back", size: 22, help: "Lists") { back() } }
                     LargeTitle(current.name.string, color: current.color.string == "gray" ? Look.text : Palette.color(current.color.string))
+                        .lineLimit(1).minimumScaleFactor(0.6)
                     if !list.isNull {
                         let from = !list.from.isNull
                         IconButton(from ? "people" : "edit", size: 19, help: from ? "About this list" : "Edit list") { model.listSheet = list }
