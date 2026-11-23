@@ -19,6 +19,7 @@ import app.uuob.kit.Shortcuts
 import app.uuob.kit.ShortcutsHost
 import app.uuob.kit.SidebarRow
 import app.uuob.kit.SidebarScaffold
+import app.uuob.kit.LocalDrawerMode
 import app.uuob.kit.Toolbar
 import android.content.Context
 import androidx.activity.compose.BackHandler
@@ -394,10 +395,7 @@ private fun Circle(color: Color, size: Int, icon: String, iconSize: Int, stroke:
 @Composable
 private fun Sidebar(model: TasksModel, s: JSONObject, updater: Updater, modifier: Modifier) {
   Column(modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-    Row(Modifier.fillMaxWidth().padding(start = 10.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-      Text("Tasks", Modifier.weight(1f), fontSize = 22.sp, fontWeight = FontWeight.Bold)
-      UpdateButton(updater)
-    }
+    Row(Modifier.fillMaxWidth().padding(bottom = 4.dp), horizontalArrangement = Arrangement.End) { UpdateButton(updater) }
     objects(s.getJSONArray("smart").toString()).forEach { sm ->
       SidebarRow(sm.optString("name"), model.view == sm.optString("id"), { model.go(sm.optString("id")) }, leading = { Circle(tint(sm.optString("color")), 22, sm.optString("icon"), 13) }) {
         Text("${sm.optInt("count")}", fontSize = 14.sp)
@@ -440,7 +438,7 @@ private fun MainList(model: TasksModel, s: JSONObject) {
   val list = current.optJSONObject("list")
   val groups = objects(s.getJSONArray("groups").toString())
   BoxWithConstraints(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-    val phone = maxWidth < 600.dp
+    val phone = LocalDrawerMode.current
     val wide = maxWidth >= 720.dp
     LazyColumn(
       Modifier.fillMaxSize().safeDrawingPadding().imePadding(),
