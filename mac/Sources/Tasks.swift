@@ -26,13 +26,28 @@ struct TasksApp: App {
     var body: some Scene {
         WindowGroup("Tasks") {
             Gate(uuob: model.uuob, updater: updater) { TasksView(model: model, updater: updater) }
-                // Small windows work too: one column at a time, as on a phone.
-                .frame(minWidth: 360, minHeight: 420)
+                // Small windows work too: the lists fold to a rail.
+                .frame(minWidth: 380, minHeight: 420)
                 .background(Look.bg)
         }
         // No title bar: the sidebar and the list are the window, as on the web.
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1100, height: 760)
+        .commands { Self.commands(model) }
+    }
+
+    /// The shared shortcuts (docs/design.md) and Tasks' own: New list, the four views.
+    @MainActor static func commands(_ model: TasksModel) -> UuobCommands {
+        var extra: [Shortcut] = [Shortcut(title: "New List", key: "n", modifiers: [.command, .shift]) { model.newList() }]
+        for (i, v) in [("Today", "today"), ("Upcoming", "upcoming"), ("All", "all"), ("Completed", "completed")].enumerated() {
+            extra.append(Shortcut(title: v.0, key: KeyEquivalent(Character("\(i + 1)"))) { model.go(v.1) })
+        }
+        return UuobCommands(
+            settings: { model.settingsOpen = true },
+            new: { model.newTask() }, newTitle: "New Task",
+            refresh: { Task { await model.load() } },
+            extraMenu: "Go", extra: extra
+        )
     }
 }
 
@@ -61,7 +76,11 @@ final class TasksModel {
     var alertsKnown = false
     var view = "today"
     var finishing: Set<String> = []
-    var openId: String?
+    /// The task whose card is shown, and the one being edited (as the screen drew them).
+    var card: J?
+    var editing: J?
+    /// Asks the quick field for the keyboard (New task: ⌘N or C).
+    var quickFocus = 0
     var listSheet: J?
     var settingsOpen = false
     private var upcomingGen = 0
@@ -144,12 +163,13 @@ final class TasksModel {
 
     func go(_ id: String) {
         view = id
-        openId = nil
-        listShown = true
     }
 
-    /// In a narrow window: the list on screen instead of the lists (as on a phone).
-    var listShown = false
+    /// New task: the quick field, ready for typing (Today, where a view has none).
+    func newTask() {
+        if !screen.current.canAdd.bool { view = "today" }
+        quickFocus += 1
+    }
 
     func add(_ text: String, list: String?) {
         let record = quickTask(text: text, view: view)
@@ -176,25 +196,17 @@ final class TasksModel {
         Task { _ = try? await client.put(collection: "tasks", container: arg(x.container.str), id: nil, value: stored(task: x.text)) }
     }
 
-    /// One field of a task changed in its editor.
-    func set(_ x: J, _ field: String, _ value: Any?) {
-        // Only a task still there (an editor's text must not bring back a deleted or moved one).
-        guard let now = J(text: tasks).array.first(where: { $0.id == x.id && $0.container == x.container }) else { return }
-        var y = (now.value as? [String: Any]) ?? [:]
-        y[field] = value ?? NSNull()
-        let next = J(y)
-        if next != now { save(next) }
-    }
-
     func remove(_ x: J) {
-        openId = nil
+        card = nil
+        editing = nil
         tasks = J(J(text: tasks).array.filter { !($0.id == x.id && $0.container == x.container) }.map { $0.value as Any }).text
         Task { _ = try? await client.delete(collection: "tasks", container: arg(x.container.str), id: x.id) }
     }
 
     /// Moving a task to another list moves it to that list's container.
-    func move(_ x: J, to list: String?) {
-        let x = current(x)
+    /// `edited`: the task as its editor left it (else as it is now).
+    func move(_ x: J, to list: String?, edited: Bool = false) {
+        let x = edited ? x : current(x)
         let to = list ?? main
         let from = x.container.str ?? main
         guard to != from else { return }
@@ -249,26 +261,25 @@ final class TasksModel {
     }
 }
 
+
 struct TasksView: View {
     @Bindable var model: TasksModel
     @Bindable var updater: Updater
 
     var body: some View {
         let s = model.screen
-        GeometryReader { geo in
-            // A narrow window shows the lists, or one list with a way back (as on a phone).
-            if geo.size.width >= 700 {
-                HStack(spacing: 0) {
-                    Sidebar(model: model, updater: updater, s: s).frame(width: 290)
-                    Rectangle().fill(Look.line).frame(width: 1)
-                    MainList(model: model, s: s)
-                }
-            } else if model.listShown {
-                MainList(model: model, s: s, back: { model.listShown = false })
-            } else {
-                Sidebar(model: model, updater: updater, s: s)
-            }
+        let color = s.current.color.string
+        let tint: Color? = color == "gray" || color == "blue" || color.isEmpty ? nil : Palette.color(color)
+        // The views and lists on the left (a rail of their circles when folded or narrow), the list on the right.
+        SidebarScaffold {
+            Sidebar(model: model, updater: updater, s: s)
+        } rail: {
+            TasksRail(model: model, s: s)
+        } content: {
+            MainList(model: model, s: s).uuobTint(tint)
         }
+        // ⌘K, ⌘?, and C / ? where no field is typing (docs/design.md).
+        .uuobKeys(TasksApp.commands(model))
         .ignoresSafeArea(.container, edges: .top)
         .foregroundStyle(Look.text)
         .sheet(isPresented: $model.settingsOpen) {
@@ -281,148 +292,151 @@ struct TasksView: View {
                 }
             }
         }
+        .sheet(item: $model.card) { x in TaskCard(model: model, x: x, lists: s.lists.array).uuobTint(sheetTint(x, tint)) }
+        .sheet(item: $model.editing) { x in TaskEditor(model: model, x: x, lists: s.lists.array).uuobTint(sheetTint(x, tint)) }
         .sheet(item: $model.listSheet) { sheet in ListSheet(model: model, start: sheet) }
+    }
+
+    /// A task's sheets take its list's colour (in a smart view) or the page's.
+    private func sheetTint(_ x: J, _ page: Color?) -> Color? {
+        if let c = x.show.listColor.str { return Palette.color(c) }
+        return page
     }
 }
 
-/// The sidebar: the smart views as tiles, the lists, Add list, Settings.
+/// A coloured circle with a white icon (`.circle`), centred.
+private func mark(_ color: Color, _ icon: String, _ size: CGFloat) -> some View {
+    Circled(icon: icon, color: color, size: size)
+}
+
+/// The sidebar (the kit's): the views, the lists, New list, Settings.
 struct Sidebar: View {
     @Bindable var model: TasksModel
     @Bindable var updater: Updater
     let s: J
+    @Environment(\.uuobClosePeek) private var closePeek
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                // Room for the window's buttons, and the update button when there is one.
-                HStack { Spacer(); UpdateButton(updater: updater) }.frame(minHeight: 28).padding(.bottom, 8)
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible())], spacing: 10) {
+        VStack(alignment: .leading, spacing: 2) {
+            // Room for the window's buttons, and the update button when there is one.
+            HStack { Spacer(); UpdateButton(updater: updater) }.frame(minHeight: 28).padding(.bottom, 8)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
                     ForEach(s.smart.array) { sm in
-                        Button { model.go(sm.id) } label: { SmartTile(sm: sm, on: model.view == sm.id) }.buttonStyle(PressStyle())
+                        SidebarRow(title: sm.name.string, selected: model.view == sm.id) {
+                            mark(listTint(sm.color.string), sm.icon.string, 22)
+                        } trailing: {
+                            Text("\(sm.count.int)")
+                        } action: { model.go(sm.id); closePeek() }
                     }
+                    if !s.lists.array.isEmpty {
+                        RowsLabel("My lists").padding(.horizontal, 10).padding(.top, 12).padding(.bottom, 4)
+                    }
+                    ForEach(s.lists.array) { l in
+                        SidebarRow(title: l.name.string, selected: model.view == l.id) {
+                            mark(Palette.color(l.color.string), "list", 22)
+                        } trailing: {
+                            HStack(spacing: 6) {
+                                if l.shared.bool { Ico("people", size: 14).help(l.note.string) }
+                                Text("\(l.count.int)")
+                            }
+                        } action: { model.go(l.id); closePeek() }
+                    }
+                    SidebarRow(title: "New list") { Ico("plus", size: 18, stroke: 2).foregroundStyle(Look.text2) } action: { closePeek(); model.newList() }
+                        .padding(.top, 6)
                 }
-                SectionLabel("My lists").padding(.top, 26).padding(.horizontal, 8).padding(.bottom, 8)
-                ForEach(s.lists.array) { l in
-                    Button { model.go(l.id) } label: { ListRow(l: l, on: model.view == l.id) }.buttonStyle(.plain)
-                }
-                if s.lists.array.isEmpty {
-                    Text("Group tasks into lists like Home, Work or Groceries.").font(.system(size: 13)).foregroundStyle(Look.text2).padding(.horizontal, 8).padding(.bottom, 6)
-                }
-                Button { model.newList() } label: { IconLabel("plus", "Add list") }.buttonStyle(UuobButton(.ghost)).padding(.top, 8)
             }
-            .padding(.horizontal, 16).padding(.top, 20)
+            .scrollIndicators(.never)
+            SidebarRow(title: "Settings") { Ico("settings", size: 19).foregroundStyle(Look.text2) } action: { closePeek(); model.settingsOpen = true }
         }
-        .safeAreaInset(edge: .bottom) {
-            HStack {
-                Button { model.settingsOpen = true } label: { IconLabel("settings", "Settings") }.buttonStyle(UuobButton(.quiet))
-                Spacer()
-            }
-            .padding(.horizontal, 16).padding(.bottom, 18)
-        }
-        .background(Look.elevated)
+        .padding(.horizontal, 12).padding(.top, 20).padding(.bottom, 4)
     }
 }
 
-/// A button that shrinks a little while pressed (the tiles).
+/// Folded or narrow: the views' and lists' circles, New list, Settings.
+struct TasksRail: View {
+    @Bindable var model: TasksModel
+    let s: J
+
+    var body: some View {
+        VStack(spacing: 6) {
+            Color.clear.frame(height: 30) // the window's buttons
+            ForEach(s.smart.array) { sm in
+                RailButton(help: sm.name.string, selected: model.view == sm.id) { mark(listTint(sm.color.string), sm.icon.string, 24) } action: { model.go(sm.id) }
+            }
+            if !s.lists.array.isEmpty { Rectangle().fill(Look.line).frame(width: 28, height: 1).padding(.vertical, 4) }
+            ForEach(s.lists.array) { l in
+                RailButton(help: l.name.string, selected: model.view == l.id) { mark(Palette.color(l.color.string), "list", 22) } action: { model.go(l.id) }
+            }
+            RailButton("plus", help: "New list (⇧⌘N)") { model.newList() }
+            Spacer()
+            RailButton("settings", help: "Settings (⌘,)") { model.settingsOpen = true }
+        }
+        .padding(.top, 4)
+    }
+}
+
+/// A button that shrinks a little while pressed (the swatches).
 struct PressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label.scaleEffect(configuration.isPressed ? 0.97 : 1).animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
-/// `.smart-tile`: a white tile with its round icon, count and name.
-struct SmartTile: View {
-    let sm: J
-    let on: Bool
-    @State private var hover = false
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Circled(icon: sm.icon.string, color: listTint(sm.color.string), size: 30)
-                Spacer()
-                Text("\(sm.count.int)").font(.system(size: 24, weight: .bold))
-            }
-            Text(sm.name.string).font(.system(size: 15, weight: .semibold)).foregroundStyle(Look.text2)
-        }
-        .padding(12)
-        .background(on ? Look.accentSoft : hover ? Look.hover : Look.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(on ? Look.accent.opacity(0.5) : Look.line))
-        .contentShape(Rectangle())
-        .onHover { hover = $0 }
-    }
-}
-
-/// `.list-row`.
-struct ListRow: View {
-    let l: J
-    let on: Bool
-    @State private var hover = false
-    var body: some View {
-        HStack(spacing: 12) {
-            Circled(icon: "list", color: Palette.color(l.color.string), size: 26)
-            Text(l.name.string).font(.system(size: 15, weight: .medium)).lineLimit(1)
-            Spacer()
-            if l.shared.bool { Ico("people", size: 15).foregroundStyle(Look.text3).help(l.note.string) }
-            Text("\(l.count.int)").font(.system(size: 15)).foregroundStyle(Look.text2)
-        }
-        .padding(8)
-        .background(on ? Look.active : hover ? Look.hover : .clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .contentShape(Rectangle())
-        .onHover { hover = $0 }
-    }
-}
-
 struct MainList: View {
     @Bindable var model: TasksModel
     let s: J
-    /// Back to the lists, in a narrow window.
-    var back: (() -> Void)? = nil
     @State private var draft = ""
     @FocusState private var typing: Bool
+    @Environment(\.uuobCompact) private var compact
+    @Environment(\.uuobTint) private var tint
 
     var body: some View {
         let current = s.current
         let list = current.list
+        let color = current.color.string
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 8) {
-                    if let back { IconButton("back", size: 22, help: "Lists") { back() } }
-                    LargeTitle(current.name.string, color: current.color.string == "gray" ? Look.text : Palette.color(current.color.string))
-                        .lineLimit(1).minimumScaleFactor(0.6)
+                Toolbar(title: titleText(current.name.string, "\(s.count.int)").foregroundStyle(color == "gray" ? Look.text : Palette.color(color)), compact: compact) {
                     if !list.isNull {
                         let from = !list.from.isNull
-                        IconButton(from ? "people" : "edit", size: 19, help: from ? "About this list" : "Edit list") { model.listSheet = list }
-                        if !from { IconButton("share", size: 19, help: "Share list") { model.share(list.id) } }
+                        HStack(spacing: 4) {
+                            IconButton(from ? "people" : "edit", size: 19, help: from ? "About this list" : "Edit list") { model.listSheet = list }
+                            if !from { IconButton("share", size: 19, help: "Share list") { model.share(list.id) } }
+                        }
                     }
-                    Spacer()
-                    Text("\(s.count.int)").font(.system(size: 34, weight: .bold)).foregroundStyle(Look.text3)
                 }
-                .padding(.bottom, 18)
                 if !list.note.string.isEmpty {
                     HStack(spacing: 6) { Ico("people", size: 14); Text(list.note.string) }.font(.system(size: 13)).foregroundStyle(Look.text2).padding(.top, -10).padding(.bottom, 14)
                 }
                 if current.canAdd.bool { quickAdd(list) }
                 ForEach(s.groups.array, id: \.groupKey) { g in
                     if !g.key.string.isEmpty { Text(g.key.string).font(.system(size: 15, weight: .bold)).padding(.top, 22).padding(.horizontal, 4).padding(.bottom, 6) }
-                    ForEach(g.items.array, id: \.rowKey) { x in TaskRow(model: model, x: x, lists: s.lists.array) }
+                    let items = g.items.array
+                    ForEach(Array(items.enumerated()), id: \.element.rowKey) { i, x in
+                        TaskRow(model: model, x: x, last: i == items.count - 1)
+                    }
                 }
                 if let e = Optional(s.empty), !e.isNull {
-                    Empty(glyph: e.glyph.string, headline: e.headline.string, caption: e.caption.string)
+                    EmptyState(icon: "check", headline: e.headline.string)
                 }
             }
             .frame(maxWidth: 760)
-            .padding(.horizontal, 48).padding(.top, 48).padding(.bottom, 80)
+            .padding(.horizontal, compact ? 14 : 28).padding(.top, compact ? 40 : 48).padding(.bottom, 80)
             .frame(maxWidth: .infinity)
             .animation(.spring(duration: 0.26), value: s.groups)
         }
+        .scrollIndicators(.never)
         .background(Look.bg)
         .onChange(of: model.view) { draft = "" }
+        .onChange(of: model.quickFocus) { typing = true }
     }
 
-    /// `.quick`: a white field with a blue plus, and what the date will be while typing.
+    /// `.quick`: a white field with a plus in the list's colour, and what the date will be while typing.
     private func quickAdd(_ list: J) -> some View {
-        HStack(spacing: 12) {
-            Ico("plus", size: 20, stroke: 2.2).foregroundStyle(Look.accent)
+        let accent = tint ?? Look.accent
+        return HStack(spacing: 12) {
+            Ico("plus", size: 20, stroke: 2.2).foregroundStyle(accent)
             TextField("New task — try “call mom fri 5pm”", text: $draft)
                 .textFieldStyle(.plain).font(.system(size: 17)).focused($typing)
                 .onSubmit {
@@ -431,14 +445,14 @@ struct MainList: View {
                     draft = ""
                 }
             if !draft.trimmingCharacters(in: .whitespaces).isEmpty, let p = quickPreview(text: draft, hour12: model.settings.hour12) {
-                Text(p).font(.system(size: 13, weight: .semibold)).foregroundStyle(Look.accent)
-                    .padding(.horizontal, 10).padding(.vertical, 4).background(Look.accentSoft, in: Capsule())
+                Text(p).font(.system(size: 13, weight: .semibold)).foregroundStyle(accent)
+                    .padding(.horizontal, 10).padding(.vertical, 4).background(accent.opacity(0.16), in: Capsule())
             }
         }
         .padding(.horizontal, 16).frame(height: 54)
         .background(Look.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(typing ? Look.accent : Look.line))
-        .overlay(RoundedRectangle(cornerRadius: 17, style: .continuous).stroke(typing ? Look.accentSoft : .clear, lineWidth: 4).padding(-3))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(typing ? accent : Look.line))
+        .overlay(RoundedRectangle(cornerRadius: 17, style: .continuous).stroke(typing ? accent.opacity(0.16) : .clear, lineWidth: 4).padding(-3))
         .animation(.easeOut(duration: 0.18), value: typing)
         .padding(.bottom, 16)
     }
@@ -449,133 +463,168 @@ extension J {
     var rowKey: String { "\(self["container"].string)/\(id)" }
 }
 
+/// A task: its tick, title, notes and when; a click opens its card.
 struct TaskRow: View {
     @Bindable var model: TasksModel
     let x: J
-    let lists: [J]
+    var last = false
     @State private var hover = false
 
     var body: some View {
         let show = x.show
-        let open = model.openId == x.id
         let done = x.done.bool
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .top, spacing: 14) {
-                Button { withAnimation(.easeOut(duration: 0.22)) { model.toggle(x) } } label: {
-                    Check(on: done, ring: show.ring.str.map(Palette.color))
-                }
-                .buttonStyle(PressStyle()).disabled(!show.canEdit.bool).opacity(show.canEdit.bool ? 1 : 0.45).padding(.top, 1)
-                Button { if show.canEdit.bool { model.openId = open ? nil : x.id } } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(x.title.string).font(.system(size: 17)).strikethrough(done, color: Look.text3).foregroundStyle(done ? Look.text3 : Look.text)
-                        if !x.notes.string.isEmpty && !open {
-                            Text(x.notes.string).font(.system(size: 14)).foregroundStyle(Look.text2).lineLimit(1)
-                        }
-                        if show.when.str != nil || show.listName.str != nil {
-                            HStack(spacing: 10) {
-                                if let w = show.when.str {
-                                    Text(w).foregroundStyle(show.late.bool ? Look.danger : Look.text2).fontWeight(show.late.bool ? .medium : .regular)
-                                }
-                                if let n = show.listName.str { Text(n).fontWeight(.medium).foregroundStyle(Palette.color(show.listColor.string)) }
-                            }
-                            .font(.system(size: 14))
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
+        HStack(alignment: .top, spacing: 14) {
+            Button { withAnimation(.easeOut(duration: 0.22)) { model.toggle(x) } } label: {
+                Check(on: done, ring: show.ring.str.map(Palette.color))
             }
-            .padding(12)
-            if open { Editor(model: model, x: x, lists: lists).transition(.opacity.combined(with: .move(edge: .top))) }
+            .buttonStyle(PressStyle()).disabled(!show.canEdit.bool).opacity(show.canEdit.bool ? 1 : 0.45).padding(.top, 1)
+            Button { model.card = x } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(x.title.string).font(.system(size: 17)).strikethrough(done, color: Look.text3).foregroundStyle(done ? Look.text3 : Look.text)
+                    if !x.notes.string.isEmpty {
+                        Text(x.notes.string).font(.system(size: 14)).foregroundStyle(Look.text2).lineLimit(1)
+                    }
+                    if show.when.str != nil || show.listName.str != nil {
+                        HStack(spacing: 10) {
+                            if let w = show.when.str {
+                                Text(w).foregroundStyle(show.late.bool ? Look.danger : Look.text2).fontWeight(show.late.bool ? .medium : .regular)
+                            }
+                            if let n = show.listName.str { Text(n).fontWeight(.medium).foregroundStyle(Palette.color(show.listColor.string)) }
+                        }
+                        .font(.system(size: 14))
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         }
-        .background(open ? Look.surface : hover ? Look.hover : .clear, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .shadow(color: .black.opacity(open ? 0.1 : 0), radius: 6, y: 2)
+        .padding(.horizontal, 8).padding(.vertical, 11)
+        .background(hover ? Look.hover : .clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(alignment: .bottom) { if !last { Rectangle().fill(Look.line).frame(height: 1).padding(.leading, 44) } }
         .onHover { hover = $0 }
         .opacity(show.finishing.bool ? 0.35 : 1)
         .animation(.easeOut(duration: 0.5).delay(0.25), value: show.finishing.bool)
-        .padding(.vertical, open ? 8 : 0)
     }
 }
 
-/// A task opened in place: title, notes, date, time, list, Delete and Done.
-struct Editor: View {
+/// The task's card (the kit's detail card): when, its list, notes; Edit (⌘E), Delete, Complete.
+struct TaskCard: View {
+    @Bindable var model: TasksModel
+    let x: J
+    let lists: [J]
+
+    var body: some View {
+        let show = x.show
+        let list = lists.first { $0.id == x.list.str }
+        let rows = [show.when.str != nil ? "when" : nil, list != nil ? "list" : nil, x.notes.string.isEmpty ? nil : "notes"].compactMap { $0 }
+        DetailSheet(title: x.title.string, onClose: { model.card = nil }) {
+            if show.canEdit.bool {
+                IconButton("edit", size: 19, help: "Edit (⌘E)") { model.card = nil; model.editing = x }.keyboardShortcut("e")
+            }
+        } content: {
+            VStack(spacing: 0) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { i, r in
+                    let last = i == rows.count - 1
+                    switch r {
+                    case "when":
+                        IconRow("clock", last: last) { Text(show.when.string).foregroundStyle(show.late.bool ? Look.danger : Look.text) }
+                    case "list":
+                        IconRow("list", last: last) {
+                            Circle().fill(Palette.color(list?.color.string ?? "blue")).frame(width: 10, height: 10)
+                            Text(list?.name.string ?? "")
+                        }
+                    default:
+                        IconRow("notes", last: last) { Text(x.notes.string).textSelection(.enabled).padding(.vertical, 10).frame(maxWidth: .infinity, alignment: .leading) }
+                    }
+                }
+            }
+            .padding(.top, 6)
+        } footer: {
+            if show.canEdit.bool {
+                HStack {
+                    Button("Delete", role: .destructive) { model.remove(x) }.buttonStyle(UuobButton(.danger, small: true)).keyboardShortcut(.delete, modifiers: .command)
+                    Spacer()
+                    Button(x.done.bool ? "Not done" : "Complete") { model.card = nil; model.toggle(x) }.buttonStyle(UuobButton(.primary, small: true))
+                }
+                .padding(.top, 18)
+            }
+        }
+    }
+}
+
+/// The task's editor (the kit's editor): the title, its list under it, notes, date, time. Nothing changes until Save.
+struct TaskEditor: View {
     @Bindable var model: TasksModel
     let x: J
     let lists: [J]
     @State private var title = ""
     @State private var notes = ""
-    @FocusState private var focus: Int?
+    @State private var due: String?
+    @State private var time: String?
+    @State private var list = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            TextField("Title", text: $title).focused($focus, equals: 1)
-                .onSubmit { model.set(x, "title", title) }
-            TextField("Notes", text: $notes, axis: .vertical).lineLimit(2...6).focused($focus, equals: 2)
-            HStack(alignment: .bottom, spacing: 10) {
-                Stack("Date") {
-                    HStack(spacing: 6) {
-                        if let due = x.due.str, let d = ISO8601DateFormatter.day.date(from: due) {
-                            DatePicker("", selection: Binding(get: { d }, set: { model.set(x, "due", ISO8601DateFormatter.day.string(from: $0)) }), displayedComponents: .date)
-                                .labelsHidden().datePickerStyle(.field)
-                                .padding(.horizontal, 10).frame(height: 46)
-                                .background(Look.surface2, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Look.line))
-                            IconButton("close", size: 16, help: "No date") { model.set(x, "due", nil) }
-                        } else {
-                            Button("Add date") { model.set(x, "due", today()) }.frame(height: 46)
-                        }
+        let writable = lists.filter { $0.canWrite.value == nil || $0.canWrite.bool }
+        EditSheet(placeholder: "Task", title: $title, canSave: !title.trimmingCharacters(in: .whitespaces).isEmpty,
+                  onCancel: { model.editing = nil }, onSave: save, onDelete: { model.remove(x) }) {
+            HStack(spacing: 6) {
+                Ico("list", size: 15).foregroundStyle(Look.text2)
+                Menu {
+                    Button("No list") { list = "" }
+                    ForEach(writable) { l in Button(l.name.string) { list = l.id } }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(writable.first { $0.id == list }?.name.string ?? "No list").font(.system(size: 14, weight: .semibold))
+                        Ico("chevron", size: 12).rotationEffect(.degrees(90)).foregroundStyle(Look.text2)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
+            }
+        } content: {
+            VStack(spacing: 0) {
+                IconRow("notes") {
+                    TextField("Notes", text: $notes, axis: .vertical).textFieldStyle(.plain).lineLimit(1...6).padding(.vertical, 10)
+                }
+                IconRow("calendar") {
+                    if let d = due.flatMap({ ISO8601DateFormatter.day.date(from: $0) }) {
+                        DatePicker("", selection: Binding(get: { d }, set: { due = ISO8601DateFormatter.day.string(from: $0) }), displayedComponents: .date)
+                            .labelsHidden().datePickerStyle(.field)
+                        Spacer()
+                        IconButton("close", size: 16, help: "No date") { due = nil }
+                    } else {
+                        Button("Add date") { due = today() }.buttonStyle(.plain).foregroundStyle(Look.text3)
+                        Spacer()
                     }
                 }
-                Stack("Time") {
-                    TimeField(value: Binding(get: { x.time.str }, set: { model.set(x, "time", $0) }), hour12: model.settings.hour12, optional: true, placeholder: "None")
-                        .frame(width: 120)
-                }
-                Stack("List") {
-                    Menu {
-                        Button("None") { model.move(x, to: nil) }
-                        ForEach(lists.filter { $0.canWrite.value == nil || $0.canWrite.bool }) { l in Button(l.name.string) { model.move(x, to: l.id) } }
-                    } label: {
-                        HStack {
-                            Text(lists.first { $0.id == x.list.str }?.name.string ?? "None").foregroundStyle(Look.text)
-                            Spacer()
-                            Ico("chevron", size: 14).rotationEffect(.degrees(90)).foregroundStyle(Look.text2)
-                        }
-                        .font(.system(size: 17))
-                        .padding(.horizontal, 14).frame(height: 46)
-                        .background(Look.surface2, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Look.line))
-                        .contentShape(Rectangle())
-                    }
-                    .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
-                    .frame(maxWidth: 220)
+                IconRow("clock", last: true) {
+                    TimeField(value: $time, hour12: model.settings.hour12, optional: true, placeholder: "No time").frame(width: 120)
+                    Spacer()
                 }
             }
-            HStack {
-                Button { model.remove(x) } label: { IconLabel("trash", "Delete") }.buttonStyle(UuobButton(.danger))
-                Spacer()
-                Button("Done") { commit(); model.openId = nil }
-            }
-            .padding(.top, 4)
         }
-        .textFieldStyle(UuobField())
-        .buttonStyle(UuobButton())
-        .padding(.leading, 48).padding(.trailing, 14).padding(.bottom, 14)
         .onAppear {
             title = x.title.string
             notes = x.notes.string
+            due = x.due.str
+            time = x.time.str
+            list = x.list.str ?? ""
         }
-        // Title and notes save when they are left (as `onchange` did).
-        .onChange(of: focus) { old, _ in
-            if old == 1 { model.set(x, "title", title) }
-            if old == 2 { model.set(x, "notes", notes) }
-        }
-        .onDisappear(perform: commit)
     }
 
-    private func commit() {
-        model.set(x, "title", title)
-        model.set(x, "notes", notes)
+    private func save() {
+        var y = (model.current(x).value as? [String: Any]) ?? [:]
+        y["title"] = title.trimmingCharacters(in: .whitespaces)
+        y["notes"] = notes
+        y["due"] = due ?? NSNull()
+        y["time"] = time ?? NSNull()
+        model.editing = nil
+        if list != (x.list.str ?? "") {
+            model.move(J(y), to: list.isEmpty ? nil : list, edited: true)
+        } else {
+            model.save(J(y))
+        }
     }
 }
 
@@ -589,7 +638,7 @@ extension ISO8601DateFormatter {
     }()
 }
 
-/// New list / edit a list (`.sheet` with the hero circle and swatches), or one shared with you.
+/// New list / edit a list (the kit's editor: name, colour, sharing), or a card for one shared with you.
 struct ListSheet: View {
     @Bindable var model: TasksModel
     let start: J
@@ -600,44 +649,46 @@ struct ListSheet: View {
         let id = start.id.isEmpty ? nil : start.id
         Group {
             if !start.from.isNull {
-                SheetFrame(title: start.name.string, lead: "\(start.from.name.string) shares this list with you. " + (start.canWrite.bool ? "You can both change it." : "You can view it, but not change it.")) {
+                DetailSheet(title: start.name.string, onClose: { model.listSheet = nil }) {
                     EmptyView()
-                } buttons: {
-                    Button("Leave list", role: .destructive) { if let id { model.deleteList(id) } }
-                    Button("Done") { model.listSheet = nil }.buttonStyle(UuobButton(.primary, large: true)).keyboardShortcut(.defaultAction)
+                } content: {
+                    IconRow("people", last: true) {
+                        Text("\(start.from.name.string) shares this list with you. " + (start.canWrite.bool ? "You can both change it." : "You can view it, but not change it."))
+                            .fixedSize(horizontal: false, vertical: true).padding(.vertical, 10)
+                    }
+                    .padding(.top, 6)
+                } footer: {
+                    Button("Leave list", role: .destructive) { if let id { model.deleteList(id) } }.buttonStyle(UuobButton(.danger, small: true)).padding(.top, 18)
                 }
             } else {
-                SheetFrame(title: "", center: true) {
-                    Circled(icon: "list", color: Palette.color(color), size: 72)
-                        .shadow(color: .black.opacity(0.15), radius: 8, y: 3).padding(.bottom, 4)
-                    TextField("List name", text: $name)
-                        .font(.system(size: 20, weight: .semibold)).multilineTextAlignment(.center).frame(height: 54)
-                        .onSubmit { model.saveList(id: id, name: name, color: color, created: start.created.int64) }
-                    HStack(spacing: 12) {
-                        ForEach(Palette.names, id: \.self) { c in
-                            Button { color = c } label: {
-                                Circle().fill(Palette.color(c)).frame(width: 32, height: 32)
-                                    .overlay(Circle().strokeBorder(Look.elevated, lineWidth: c == color ? 3 : 0))
-                                    .overlay(Circle().strokeBorder(Look.text2, lineWidth: c == color ? 2 : 0).padding(-5))
+                EditSheet(placeholder: "List name", title: $name, isNew: id == nil, canSave: !name.trimmingCharacters(in: .whitespaces).isEmpty,
+                          saveLabel: id == nil ? "Create" : nil,
+                          onCancel: { model.listSheet = nil },
+                          onSave: { model.saveList(id: id, name: name, color: color, created: start.created.int64) },
+                          onDelete: id.map { i in { model.deleteList(i) } }) {
+                    VStack(spacing: 0) {
+                        IconRow("list", last: id == nil) {
+                            HStack(spacing: 10) {
+                                ForEach(Palette.names, id: \.self) { c in
+                                    Button { color = c } label: {
+                                        Circle().fill(Palette.color(c)).frame(width: 26, height: 26)
+                                            .overlay(Circle().strokeBorder(Look.elevated, lineWidth: c == color ? 3 : 0))
+                                            .overlay(Circle().strokeBorder(Look.text2, lineWidth: c == color ? 2 : 0).padding(-4))
+                                    }
+                                    .buttonStyle(PressStyle()).help(c)
+                                }
                             }
-                            .buttonStyle(PressStyle()).help(c)
+                            .padding(.vertical, 8)
+                        }
+                        if let id {
+                            IconRow("share", last: true) {
+                                Button(start.sharedWith.array.isEmpty ? "Share list…" : start.note.string) { model.share(id) }.buttonStyle(.plain)
+                                Spacer()
+                            }
                         }
                     }
-                    .padding(.vertical, 6)
-                    if let id {
-                        Button { model.share(id) } label: { IconLabel("share", start.sharedWith.array.isEmpty ? "Share list…" : start.note.string) }
-                            .buttonStyle(UuobButton(.ghost))
-                    }
-                } buttons: {
-                    if let id {
-                        Button("Delete", role: .destructive) { model.deleteList(id) }
-                    } else {
-                        Button("Cancel") { model.listSheet = nil }.keyboardShortcut(.cancelAction)
-                    }
-                    Button(id == nil ? "Create" : "Save") { model.saveList(id: id, name: name, color: color, created: start.created.int64) }
-                        .buttonStyle(UuobButton(.primary, large: true)).keyboardShortcut(.defaultAction)
-                        .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
+                .uuobTint(Palette.color(color))
             }
         }
         .onAppear {

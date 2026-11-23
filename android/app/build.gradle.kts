@@ -38,6 +38,8 @@ android {
     }
     // UUOB's kit for apps: the connect screen, theme and updater.
     sourceSets["main"].kotlin.srcDir("../../sdk/kit/android/src")
+    // The kit's UI-only part (UUOB itself takes just this one).
+    sourceSets["main"].kotlin.srcDir("../../sdk/kit/android/ui/src")
     packaging { jniLibs { useLegacyPackaging = false } }
 }
 

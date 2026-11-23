@@ -39,14 +39,17 @@ pub enum Msg {
     Go(String),
     Add(String),
     Toggle(Value),
-    /// A task changed; `quiet`: from a field still being edited, so the
-    /// screen isn't rebuilt under the user's cursor.
-    Save(Value, bool),
-    /// One field of a task changed in its editor (`quiet` as for Save).
-    Set(Value, &'static str, Value, bool),
+    /// A task changed (from its editor or its tick).
+    Save(Value),
+    /// A task edited and moved to another list: kept as edited, then moved.
+    SaveMove(Value, Option<String>),
     Remove(Value),
     Move(Value, Option<String>),
-    Open(Option<String>),
+    /// The task's card, and its editor.
+    Card(Value),
+    Edit(Value),
+    /// New task (Ctrl+N or C): the quick field, ready for typing.
+    NewTask,
     Finished(String),
     NewList,
     EditList,
@@ -79,26 +82,26 @@ pub struct Tasks {
     finishing: HashSet<String>,
     /// Just checked off: the circle fills and the row fades as it is drawn.
     animate: HashSet<String>,
-    open_id: Option<String>,
     /// The screen last drawn (the core's answer), to draw only when it changed.
     last: Value,
     upcoming_gen: u64,
 }
 
 pub struct Widgets {
-    split: adw::NavigationSplitView,
-    smart: gtk::Grid,
-    lists: gtk::ListBox,
-    hint: gtk::Label,
-    content_page: adw::NavigationPage,
+    /// The sidebar's views and lists, and the rail's (redrawn with the screen).
+    side_rows: gtk::Box,
+    rail_rows: gtk::Box,
+    /// The page, tinted with the list's colour.
+    page: gtk::Widget,
     title: gtk::Label,
     edit: gtk::Button,
     share: gtk::Button,
-    count: gtk::Label,
     note: gtk::Label,
     quick: gtk::Entry,
     quick_row: gtk::Box,
     groups: gtk::Box,
+    /// Closes the sidebar shown over a narrow window, once a view is picked.
+    close_peek: Rc<dyn Fn()>,
 }
 
 fn circle(color: &str, size: i32, icon: &str) -> gtk::Widget {
@@ -121,18 +124,28 @@ fn icon_of(name: &str) -> &'static str {
     }
 }
 
-fn icon_label(icon: &str, label: &str) -> gtk::Box {
-    let b = gtk::Box::builder().spacing(6).build();
-    b.append(&uuob_kit_gtk::icon(icon, 19, 1.75, uuob_kit_gtk::text2()));
-    b.append(&gtk::Label::new(Some(label)));
-    b
+/// A circle of the list's colour with its icon, centred (for the sidebar and the rail).
+fn mark(color: &str, size: i32, icon: &str) -> gtk::Widget {
+    let m = circle(color, size, icon);
+    m.set_halign(gtk::Align::Center);
+    m
 }
 
-/// Saves when the field is left or Enter is pressed (as `onchange` did).
-fn on_leave(widget: &impl IsA<gtk::Widget>, f: impl Fn() + 'static) {
-    let focus = gtk::EventControllerFocus::new();
-    focus.connect_leave(move |_| f());
-    widget.add_controller(focus);
+fn label(text: &str, classes: &[&str]) -> gtk::Label {
+    gtk::Label::builder().label(text).xalign(0.0).wrap(true).wrap_mode(gtk::pango::WrapMode::WordChar).css_classes(classes.to_vec()).build()
+}
+
+/// A key on a dialog (Ctrl+E Edit, Delete…), while it is in front.
+fn dialog_key(d: &adw::Dialog, accel: &str, f: impl Fn() + 'static) {
+    let keys = gtk::ShortcutController::new();
+    keys.add_shortcut(gtk::Shortcut::new(
+        gtk::ShortcutTrigger::parse_string(accel),
+        Some(gtk::CallbackAction::new(move |_, _| {
+            f();
+            glib::Propagation::Stop
+        })),
+    ));
+    d.add_controller(keys);
 }
 
 impl Tasks {
@@ -185,44 +198,51 @@ impl Tasks {
     }
 
     fn render_sidebar(&self, screen: &Value, w: &Widgets, sender: &ComponentSender<Self>) {
-        while let Some(c) = w.smart.first_child() {
-            w.smart.remove(&c);
-        }
-        for (i, sm) in screen["smart"].as_array().into_iter().flatten().enumerate() {
-            let top = gtk::Box::builder().spacing(6).build();
-            top.append(&circle(s(sm, "color"), 30, icon_of(s(sm, "icon"))));
-            top.append(&gtk::Label::builder().label(sm["count"].to_string()).hexpand(true).xalign(1.0).css_classes(["count-big"]).build());
-            let col = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).build();
-            col.append(&top);
-            col.append(&gtk::Label::builder().label(s(sm, "name")).xalign(0.0).css_classes(["tile-label"]).build());
-            let b = gtk::Button::builder().child(&col).hexpand(true).css_classes(["smart-tile"]).build();
-            if s(sm, "id") == self.view {
-                b.add_css_class("on");
+        for b in [&w.side_rows, &w.rail_rows] {
+            while let Some(c) = b.first_child() {
+                b.remove(&c);
             }
-            let id = s(sm, "id").to_string();
-            let tx = sender.clone();
-            b.connect_clicked(move |_| tx.input(Msg::Go(id.clone())));
-            w.smart.attach(&b, (i % 2) as i32, (i / 2) as i32, 1, 1);
         }
-        while let Some(c) = w.lists.first_child() {
-            w.lists.remove(&c);
+        let go = |b: &gtk::Button, id: &str| {
+            let (tx, id, close) = (sender.clone(), id.to_string(), w.close_peek.clone());
+            b.connect_clicked(move |_| {
+                close();
+                tx.input(Msg::Go(id.clone()));
+            });
+        };
+        // Today, Upcoming, All, Completed: a row with the count; on the rail their circles.
+        for sm in screen["smart"].as_array().into_iter().flatten() {
+            let on = s(sm, "id") == self.view;
+            let count = gtk::Label::new(Some(&sm["count"].to_string()));
+            let r = uuob_kit_gtk::sidebar_row(Some(&mark(s(sm, "color"), 22, icon_of(s(sm, "icon")))), s(sm, "name"), Some(count.upcast_ref()), on);
+            go(&r, s(sm, "id"));
+            w.side_rows.append(&r);
+            let rb = uuob_kit_gtk::rail_button(&mark(s(sm, "color"), 24, icon_of(s(sm, "icon"))), s(sm, "name"), on);
+            go(&rb, s(sm, "id"));
+            w.rail_rows.append(&rb);
         }
         let lists = screen["lists"].as_array().cloned().unwrap_or_default();
-        w.hint.set_visible(lists.is_empty());
+        if !lists.is_empty() {
+            let l = uuob_kit_gtk::rows_label("My lists");
+            l.set_margin_top(18);
+            l.set_margin_start(10);
+            l.set_margin_bottom(4);
+            w.side_rows.append(&l);
+            w.rail_rows.append(&gtk::Separator::builder().margin_start(18).margin_end(18).margin_top(4).margin_bottom(4).build());
+        }
         for l in lists {
-            let row = gtk::Box::builder().spacing(12).hexpand(true).css_classes(["list-row"]).build();
-            row.append(&circle(s(&l, "color"), 26, "list"));
-            row.append(&gtk::Label::builder().label(s(&l, "name")).hexpand(true).xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).css_classes(["list-name"]).build());
+            let on = s(&l, "id") == self.view;
+            let end = gtk::Box::builder().spacing(6).build();
             if l["shared"] == json!(true) {
-                row.append(&uuob_kit_gtk::icon("people", 15, 1.75, uuob_kit_gtk::text2()));
+                end.append(&uuob_kit_gtk::icon("people", 15, 1.75, uuob_kit_gtk::text2()));
             }
-            row.append(&gtk::Label::builder().label(l["count"].to_string()).css_classes(["dim-label"]).build());
-            let r = gtk::ListBoxRow::builder().child(&row).build();
-            r.set_widget_name(s(&l, "id"));
-            if s(&l, "id") == self.view {
-                r.add_css_class("on");
-            }
-            w.lists.append(&r);
+            end.append(&gtk::Label::new(Some(&l["count"].to_string())));
+            let r = uuob_kit_gtk::sidebar_row(Some(&mark(s(&l, "color"), 22, "list")), s(&l, "name"), Some(end.upcast_ref()), on);
+            go(&r, s(&l, "id"));
+            w.side_rows.append(&r);
+            let rb = uuob_kit_gtk::rail_button(&mark(s(&l, "color"), 22, "list"), s(&l, "name"), on);
+            go(&rb, s(&l, "id"));
+            w.rail_rows.append(&rb);
         }
     }
 
@@ -230,20 +250,21 @@ impl Tasks {
         let current = &screen["current"];
         let list = &current["list"];
         let color = s(current, "color");
-        w.content_page.set_title(s(current, "name"));
-        w.title.set_label(s(current, "name"));
+        // The name, its count in grey after it (the toolbar's title, as Calendar's month and year).
+        w.title.set_markup(&format!("<b>{}</b> <span weight=\"normal\" alpha=\"55%\">{}</span>", glib::markup_escape_text(s(current, "name")), screen["count"]));
         for c in uuob_kit_gtk::COLORS {
             w.title.remove_css_class(&format!("uuob-fg-{c}"));
         }
         if color != "gray" {
             w.title.add_css_class(&format!("uuob-fg-{color}"));
         }
+        // The list's colour tints the page: the +, the ticks, Save.
+        uuob_kit_gtk::set_tint(&w.page, Some(color).filter(|c| *c != "gray"));
         let from = list.get("from").is_some_and(Value::is_object);
         w.edit.set_visible(list.is_object());
-        w.edit.set_child(Some(&uuob_kit_gtk::icon(if from { "people" } else { "edit" }, 18, 1.75, uuob_kit_gtk::text2())));
+        w.edit.set_child(Some(&uuob_kit_gtk::icon(if from { "people" } else { "edit" }, 19, 1.75, uuob_kit_gtk::text2())));
         w.edit.set_tooltip_text(Some(if from { "About this list" } else { "Edit list" }));
         w.share.set_visible(list.is_object() && !from);
-        w.count.set_label(&screen["count"].to_string());
         let note = s(list, "note");
         w.note.set_label(note);
         w.note.set_visible(!note.is_empty());
@@ -256,29 +277,25 @@ impl Tasks {
             if !s(g, "key").is_empty() {
                 w.groups.append(&gtk::Label::builder().label(s(g, "key")).xalign(0.0).css_classes(["day"]).build());
             }
-            for x in g["items"].as_array().into_iter().flatten() {
-                w.groups.append(&self.task_row(x, screen, sender));
+            let items = g["items"].as_array().cloned().unwrap_or_default();
+            for (i, x) in items.iter().enumerate() {
+                w.groups.append(&self.task_row(x, sender));
+                if i + 1 < items.len() {
+                    w.groups.append(&gtk::Separator::builder().margin_start(44).css_classes(["task-line"]).build());
+                }
             }
         }
         if let Some(e) = screen["empty"].as_object() {
-            let col = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).margin_top(60).halign(gtk::Align::Center).build();
-            col.append(&gtk::Label::builder().label(e["glyph"].as_str().unwrap_or_default()).css_classes(["glyph"]).build());
-            col.append(&gtk::Label::builder().label(e["headline"].as_str().unwrap_or_default()).css_classes(["title-3"]).build());
-            col.append(&gtk::Label::builder().label(e["caption"].as_str().unwrap_or_default()).wrap(true).justify(gtk::Justification::Center).css_classes(["dim-label"]).build());
-            w.groups.append(&col);
+            w.groups.append(&uuob_kit_gtk::empty_state("check", e["headline"].as_str().unwrap_or_default(), "text3", None));
         }
     }
 
-    fn task_row(&self, x: &Value, screen: &Value, sender: &ComponentSender<Self>) -> gtk::Widget {
+    fn task_row(&self, x: &Value, sender: &ComponentSender<Self>) -> gtk::Widget {
         let show = &x["show"];
         let id = s(x, "id").to_string();
-        let open = self.open_id.as_deref() == Some(id.as_str());
         let done = x["done"] == json!(true);
         let can_edit = show["canEdit"] == json!(true);
         let card = gtk::Box::builder().orientation(gtk::Orientation::Vertical).css_classes(["task"]).build();
-        if open {
-            card.add_css_class("open");
-        }
         let line = gtk::Box::builder().spacing(12).build();
         let check = gtk::Button::builder().valign(gtk::Align::Start).sensitive(can_edit).tooltip_text("Complete").css_classes(["check"]).build();
         check.add_css_class(&show["ring"].as_str().map(|c| format!("uuob-c-{c}")).unwrap_or_else(|| "accent-fill".into()));
@@ -312,7 +329,7 @@ impl Tasks {
         }
         body.append(&title);
         let notes = s(x, "notes");
-        if !notes.is_empty() && !open {
+        if !notes.is_empty() {
             body.append(&gtk::Label::builder().label(notes.lines().next().unwrap_or_default()).xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).css_classes(["notes", "dim-label"]).build());
         }
         let when = show["when"].as_str();
@@ -329,139 +346,212 @@ impl Tasks {
             }
             body.append(&meta);
         }
-        let open_btn = gtk::Button::builder().child(&body).hexpand(true).sensitive(can_edit).css_classes(["flat", "body"]).build();
-        let tx = sender.clone();
-        let next = if open { None } else { Some(id.clone()) };
-        open_btn.connect_clicked(move |_| tx.input(Msg::Open(next.clone())));
+        // A click opens the task's card.
+        let open_btn = gtk::Button::builder().child(&body).hexpand(true).css_classes(["flat", "body"]).build();
+        let (tx, xc) = (sender.clone(), x.clone());
+        open_btn.connect_clicked(move |_| tx.input(Msg::Card(xc.clone())));
         line.append(&open_btn);
         card.append(&line);
-        if open {
-            card.append(&self.editor(x, screen, sender));
-        }
         card.upcast()
     }
 
-    fn editor(&self, x: &Value, screen: &Value, sender: &ComponentSender<Self>) -> gtk::Widget {
-        let ed = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(10).css_classes(["editor"]).build();
-        let saver = |k: &'static str| {
-            let (tx, x0) = (sender.clone(), x.clone());
-            move |v: Value, quiet: bool| tx.input(Msg::Set(x0.clone(), k, v, quiet))
-        };
-        // Title and notes save when they are left.
-        let title = gtk::Entry::builder().text(s(x, "title")).css_classes(["field"]).build();
-        let save = Rc::new(saver("title"));
-        let (sv, e) = (save.clone(), title.clone());
-        title.connect_activate(move |e| sv(json!(e.text().to_string()), true));
-        on_leave(&title, move || save(json!(e.text().to_string()), true));
-        ed.append(&title);
-        let notes = gtk::TextView::builder().wrap_mode(gtk::WrapMode::WordChar).top_margin(8).bottom_margin(8).left_margin(10).right_margin(10).css_classes(["field", "notes-field"]).build();
-        notes.buffer().set_text(s(x, "notes"));
-        let (save, n) = (saver("notes"), notes.clone());
-        on_leave(&notes, move || {
-            let b = n.buffer();
-            save(json!(b.text(&b.start_iter(), &b.end_iter(), false).to_string()), true);
-        });
-        ed.append(&gtk::Frame::builder().child(&notes).build());
+    /// The lists a task can be in: (id, name, colour) of those this user can change.
+    fn writable_lists(&self) -> Vec<(String, String, String)> {
+        self.last["lists"].as_array().into_iter().flatten().filter(|l| l["canWrite"] != json!(false)).map(|l| (s(l, "id").to_string(), s(l, "name").to_string(), s(l, "color").to_string())).collect()
+    }
 
-        let grid = gtk::Box::builder().spacing(10).homogeneous(true).build();
-        let field = |label: &str, w: &gtk::Widget| {
-            let b = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).build();
-            b.append(&gtk::Label::builder().label(label).xalign(0.0).css_classes(["caption", "dim-label"]).build());
-            b.append(w);
-            b
+    /// The task's card (the kit's detail card): when, its list, notes; Edit
+    /// (Ctrl+E), Delete, Complete.
+    fn show_card(&self, x: &Value, root: &adw::ApplicationWindow, sender: &ComponentSender<Self>) {
+        // The task as drawn (with how it shows), its fields as they are now.
+        let show = &x["show"];
+        let list_id = x["list"].clone();
+        let mut x = self.current(x);
+        x["show"] = show.clone();
+        x["list"] = list_id.clone();
+        let show = &x["show"];
+        let can_edit = show["canEdit"] == json!(true);
+        let edit = uuob_kit_gtk::icon_btn("edit", 19, "Edit (Ctrl+E)");
+        let actions: Vec<gtk::Widget> = if can_edit { vec![edit.clone().upcast()] } else { vec![] };
+        let (d, body) = uuob_kit_gtk::detail_sheet(s(&x, "title"), &actions);
+        let rows = gtk::Box::builder().orientation(gtk::Orientation::Vertical).margin_top(6).css_classes(["icon-rows"]).build();
+        let mut all: Vec<gtk::Box> = vec![];
+        if let Some(wh) = show["when"].as_str() {
+            all.push(uuob_kit_gtk::icon_row(Some("clock"), &label(wh, if show["late"] == json!(true) { &["late", "card-line"] } else { &["card-line"] })));
+        }
+        if let Some(l) = self.last["lists"].as_array().into_iter().flatten().find(|l| l["id"] == list_id) {
+            let b = gtk::Box::builder().spacing(8).build();
+            b.append(&gtk::Box::builder().valign(gtk::Align::Center).css_classes(["dot", &format!("uuob-c-{}", s(l, "color"))]).build());
+            b.append(&label(s(l, "name"), &["card-line"]));
+            all.push(uuob_kit_gtk::icon_row(Some("list"), &b));
+        }
+        if !s(&x, "notes").is_empty() {
+            let n = label(s(&x, "notes"), &["card-line"]);
+            n.set_selectable(true);
+            all.push(uuob_kit_gtk::icon_row(Some("notes"), &n));
+        }
+        let n = all.len();
+        for (i, r) in all.into_iter().enumerate() {
+            if i + 1 == n {
+                r.add_css_class("last");
+            }
+            rows.append(&r);
+        }
+        body.append(&rows);
+        if can_edit {
+            let bottom = gtk::Box::builder().spacing(10).margin_top(18).build();
+            let del = uuob_kit_gtk::btn("Delete", None, &["danger"]);
+            let done = x["done"] == json!(true);
+            let complete = uuob_kit_gtk::btn(if done { "Not done" } else { "Complete" }, None, &["primary"]);
+            bottom.append(&del);
+            bottom.append(&gtk::Box::builder().hexpand(true).build());
+            bottom.append(&complete);
+            body.append(&bottom);
+            let remove = {
+                let (tx, xc, d) = (sender.clone(), x.clone(), d.clone());
+                Rc::new(move || {
+                    d.close();
+                    tx.input(Msg::Remove(xc.clone()));
+                })
+            };
+            let r = remove.clone();
+            del.connect_clicked(move |_| r());
+            dialog_key(&d, "Delete", move || remove());
+            let (tx, xc, dd) = (sender.clone(), x.clone(), d.clone());
+            complete.connect_clicked(move |_| {
+                dd.close();
+                tx.input(Msg::Toggle(xc.clone()));
+            });
+            let open_editor = {
+                let (tx, xc, d) = (sender.clone(), x.clone(), d.clone());
+                Rc::new(move || {
+                    d.close();
+                    tx.input(Msg::Edit(xc.clone()));
+                })
+            };
+            let o = open_editor.clone();
+            edit.connect_clicked(move |_| o());
+            dialog_key(&d, "<Control>e", move || open_editor());
+        }
+        if let Some(c) = show["listColor"].as_str().or_else(|| self.last["current"]["color"].as_str()) {
+            uuob_kit_gtk::set_tint(&d, Some(c));
+        }
+        d.present(Some(root));
+    }
+
+    /// The task's editor (the kit's editor): the title, its list under it, then
+    /// notes, date and time. Nothing changes until Save; Esc or ✕ leave it as it was.
+    fn show_editor(&self, x: &Value, root: &adw::ApplicationWindow, sender: &ComponentSender<Self>) {
+        let color = x["show"]["listColor"].as_str().or_else(|| self.last["current"]["color"].as_str()).map(String::from);
+        // Its list as the screen has it (the stored task only knows its container).
+        let list_id = x["list"].as_str().map(String::from);
+        let x = self.current(x);
+        let due = Rc::new(std::cell::RefCell::new(opt(&x, "due")));
+        let time = Rc::new(std::cell::RefCell::new(opt(&x, "time")));
+        let lists = self.writable_lists();
+        let notes = gtk::TextView::builder().wrap_mode(gtk::WrapMode::WordChar).top_margin(10).bottom_margin(10).left_margin(6).right_margin(6).css_classes(["field", "notes-field"]).build();
+        notes.buffer().set_text(s(&x, "notes"));
+        let mut names = vec!["No list".to_string()];
+        names.extend(lists.iter().map(|l| l.1.clone()));
+        let drop = gtk::DropDown::builder().model(&gtk::StringList::new(&names.iter().map(String::as_str).collect::<Vec<_>>())).css_classes(["flat"]).build();
+        drop.set_selected(lists.iter().position(|l| list_id.as_deref() == Some(l.0.as_str())).map_or(0, |i| i + 1) as u32);
+        let title_cell: Rc<std::cell::OnceCell<gtk::Entry>> = Rc::new(std::cell::OnceCell::new());
+        let on_save = {
+            let (tx, x, due, time, notes, drop, lists, title_cell, list_id) = (sender.clone(), x.clone(), due.clone(), time.clone(), notes.clone(), drop.clone(), lists.clone(), title_cell.clone(), list_id.clone());
+            move || {
+                let title = title_cell.get().map(|e| e.text().trim().to_string()).unwrap_or_default();
+                if title.is_empty() {
+                    return false;
+                }
+                let mut y = x.clone();
+                y["title"] = json!(title);
+                let b = notes.buffer();
+                y["notes"] = json!(b.text(&b.start_iter(), &b.end_iter(), false).to_string());
+                y["due"] = due.borrow().clone().map(Value::from).unwrap_or(Value::Null);
+                y["time"] = time.borrow().clone().map(Value::from).unwrap_or(Value::Null);
+                let i = drop.selected() as usize;
+                let to = if i == 0 { None } else { lists.get(i - 1).map(|l| l.0.clone()) };
+                if to != list_id {
+                    tx.input(Msg::SaveMove(y, to));
+                } else {
+                    tx.input(Msg::Save(y));
+                }
+                true
+            }
         };
+        let remove: Box<dyn Fn()> = {
+            let (tx, x) = (sender.clone(), x.clone());
+            Box::new(move || tx.input(Msg::Remove(x.clone())))
+        };
+        let es = uuob_kit_gtk::edit_sheet("Task", s(&x, "title"), false, on_save, Some(remove));
+        let _ = title_cell.set(es.title.clone());
+        // Under the title: the list it is in.
+        es.under.append(&uuob_kit_gtk::icon("list", 16, 1.75, uuob_kit_gtk::text2()));
+        es.under.append(&drop);
+        let rows = gtk::Box::builder().orientation(gtk::Orientation::Vertical).css_classes(["icon-rows"]).build();
+        rows.append(&uuob_kit_gtk::icon_row(Some("notes"), &notes));
         // Date: picked from a calendar, or none.
-        let due = opt(x, "due");
-        let date_btn = gtk::MenuButton::builder().css_classes(["field"]).always_show_arrow(true).child(&gtk::Label::builder().label(due.as_deref().map(dates::friendly).unwrap_or_else(|| "None".into())).xalign(0.0).hexpand(true).build()).build();
+        let shown = |d: &Option<String>| d.as_deref().map(dates::friendly).unwrap_or_else(|| "No date".into());
+        let date_label = gtk::Label::builder().label(shown(&due.borrow())).xalign(0.0).hexpand(true).build();
+        let date_btn = gtk::MenuButton::builder().css_classes(["field", "flat"]).child(&date_label).build();
         let cal = gtk::Calendar::new();
-        if let Some(d) = due.as_deref().and_then(dates::parse) {
+        if let Some(d) = due.borrow().as_deref().and_then(dates::parse) {
             if let Ok(dt) = glib::DateTime::from_local(d.year() as i32, d.month() as i32, d.day() as i32, 12, 0, 0.0) {
                 cal.select_day(&dt);
             }
         }
         let pop_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).build();
         pop_box.append(&cal);
-        let none = gtk::Button::builder().label("None").css_classes(["flat"]).build();
+        let none = gtk::Button::builder().label("No date").css_classes(["flat"]).build();
         pop_box.append(&none);
         let pop = gtk::Popover::builder().child(&pop_box).build();
         date_btn.set_popover(Some(&pop));
-        let save = Rc::new(saver("due"));
-        let (sv, p) = (save.clone(), pop.clone());
+        let (p, dl, du) = (pop.clone(), date_label.clone(), due.clone());
         cal.connect_day_selected(move |c| {
             let d = c.date();
+            let v = Some(format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day_of_month()));
+            dl.set_label(&shown(&v));
+            *du.borrow_mut() = v;
             p.popdown();
-            sv(json!(format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day_of_month())), false);
         });
-        let p = pop.clone();
+        let (p, dl, du) = (pop.clone(), date_label.clone(), due.clone());
         none.connect_clicked(move |_| {
+            *du.borrow_mut() = None;
+            dl.set_label("No date");
             p.popdown();
-            save(Value::Null, false);
         });
-        grid.append(&field("Date", date_btn.upcast_ref()));
-        let save = saver("time");
-        let time = uuob_kit_gtk::time_field(opt(x, "time"), uuob_kit_gtk::hour12(&self.client), true, "None", move |t| save(t.map(Value::from).unwrap_or(Value::Null), true));
-        grid.append(&field("Time", time.upcast_ref()));
-        // List: the lists this user can change.
-        let lists: Vec<Value> = screen["lists"].as_array().into_iter().flatten().filter(|l| l["canWrite"] != json!(false)).cloned().collect();
-        let mut names = vec!["None".to_string()];
-        names.extend(lists.iter().map(|l| s(l, "name").to_string()));
-        let model = gtk::StringList::new(&names.iter().map(String::as_str).collect::<Vec<_>>());
-        let drop = gtk::DropDown::builder().model(&model).css_classes(["field"]).build();
-        drop.set_selected(lists.iter().position(|l| l["id"] == x["list"]).map_or(0, |i| i + 1) as u32);
-        let (tx, x0) = (sender.clone(), x.clone());
-        drop.connect_selected_notify(move |d| {
-            let i = d.selected() as usize;
-            let to = if i == 0 { None } else { lists.get(i - 1).map(|l| s(l, "id").to_string()) };
-            tx.input(Msg::Move(x0.clone(), to));
-        });
-        grid.append(&field("List", drop.upcast_ref()));
-        ed.append(&grid);
-
-        let actions = gtk::Box::builder().margin_top(4).build();
-        let del = uuob_kit_gtk::btn("Delete", Some("trash"), &["danger"]);
-        let (tx, x0) = (sender.clone(), x.clone());
-        del.connect_clicked(move |_| tx.input(Msg::Remove(x0.clone())));
-        let done = uuob_kit_gtk::btn("Done", None, &[]);
-        done.set_halign(gtk::Align::End);
-        done.set_hexpand(true);
-        let tx = sender.clone();
-        done.connect_clicked(move |_| tx.input(Msg::Open(None)));
-        actions.append(&del);
-        actions.append(&done);
-        ed.append(&actions);
-        ed.upcast()
+        rows.append(&uuob_kit_gtk::icon_row(Some("calendar"), &date_btn));
+        let tm = time.clone();
+        let time_field = uuob_kit_gtk::time_field(opt(&x, "time"), uuob_kit_gtk::hour12(&self.client), true, "No time", move |t| *tm.borrow_mut() = t);
+        time_field.add_css_class("field");
+        let last = uuob_kit_gtk::icon_row(Some("clock"), &time_field);
+        last.add_css_class("last");
+        rows.append(&last);
+        es.body.append(&rows);
+        uuob_kit_gtk::set_tint(&es.dialog, color.as_deref());
+        es.dialog.present(Some(root));
+        es.title.grab_focus();
     }
 }
 
 fn style() {
     let css = gtk::CssProvider::new();
     css.load_from_string(
-        ".sidebar-col { padding: 12px 12px 18px; }
-         .smart-tile { padding: 12px; border-radius: 14px; background: @card_bg_color; border: 1px solid @uuob_line; transition: background 160ms, border-color 160ms; }
-         .smart-tile:hover { background: mix(@card_bg_color, @window_fg_color, 0.04); }
-         .smart-tile:active { transform: scale(0.97); }
-         .smart-tile.on { background: alpha(@accent_bg_color, 0.12); border-color: alpha(@accent_bg_color, 0.5); }
+        ".side-col { padding: 4px 12px 12px; }
          .circle { border-radius: 999px; color: white; }
          .uuob-c-gray { background: alpha(@window_fg_color, 0.55); color: white; }
-         .count-big { font-size: 24px; font-weight: 700; }
-         .tile-label { font-size: 15px; font-weight: 600; color: @uuob_text2; }
-         .list-name { font-weight: 500; }
-         .large-title.narrow-title { font-size: 30px; }
-         .lists-label { margin: 22px 8px 6px; }
-         button.btn.ghost.settings-btn { color: @uuob_text2; }
-         .list-row { padding: 2px 0; }
-         list.lists row { border-radius: 10px; padding: 6px 8px; }
-         list.lists row.on { background: alpha(@window_fg_color, 0.1); }
+         .dot { min-width: 10px; min-height: 10px; border-radius: 999px; }
+         .card-line { font-size: 15px; margin: 12px 0; }
+         .task-line { background: @uuob_line; min-height: 1px; }
          .main-col { padding: 8px 28px 60px; }
-         .count-title { font-size: 34px; font-weight: 700; color: @uuob_text3; }
-         .quick { padding: 0 8px 0 16px; min-height: 54px; border-radius: 14px; background: @card_bg_color; border: 1px solid @uuob_line; margin: 6px 0 16px; transition: border-color 180ms, box-shadow 180ms; }
+         .main-col.narrow { padding: 4px 14px 40px; }
+         .quick { padding: 0 8px 0 16px; min-height: 54px; border-radius: 14px; background: @card_bg_color; border: 1px solid @uuob_line; margin: 0 0 16px; transition: border-color 180ms, box-shadow 180ms; }
          .quick:focus-within { border-color: @accent_bg_color; box-shadow: 0 0 0 4px alpha(@accent_bg_color, 0.12); }
          .quick entry { background: none; box-shadow: none; outline: none; font-size: 17px; }
          .preview { font-size: 13px; font-weight: 600; color: @accent_color; background: alpha(@accent_bg_color, 0.18); padding: 3px 10px; border-radius: 999px; margin-right: 6px; }
          .day { font-weight: 700; margin: 20px 4px 6px; }
          .task { border-radius: 14px; padding: 6px 8px; transition: opacity 500ms ease 250ms; }
          .task:hover { background: alpha(@window_fg_color, 0.04); }
-         .task.open { background: @card_bg_color; box-shadow: 0 1px 4px alpha(black, 0.15); margin: 6px 0; }
          .task.finishing { opacity: 0.35; }
          .task .body { padding: 2px 4px; }
          .task button.body:hover, .task button.body:active { background: none; }
@@ -474,48 +564,70 @@ fn style() {
          .check:not(.done) { background: none; }
          .check.done { border-color: transparent; }
          .check.done.accent-fill { background: @accent_bg_color; }
-         .editor { padding: 4px 6px 8px 40px; }
-         .notes-field { min-height: 60px; }
-         entry.field.name-field { font-size: 20px; font-weight: 600; min-height: 54px; }
-         textview.field { border: 1px solid @uuob_line; box-shadow: none; }
-         .glyph { font-size: 44px; }
-         .hero { min-width: 72px; min-height: 72px; }
+         .notes-field { min-height: 60px; background: none; }
+         dropdown.flat > button { background: none; box-shadow: none; padding: 4px 6px; }
          .swatch { min-width: 30px; min-height: 30px; padding: 0; border-radius: 999px; }
-         .swatch.on { box-shadow: 0 0 0 3px @window_bg_color, 0 0 0 5px @window_fg_color; }
-         .name-field { font-size: 18px; font-weight: 600; }",
+         .swatch.on { box-shadow: 0 0 0 3px @dialog_bg_color, 0 0 0 5px @window_fg_color; }",
     );
     gtk::style_context_add_provider_for_display(&gdk::Display::default().expect("display"), &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
 }
 
-/// Add or edit a list: its name, colour and sharing; or, for a list someone
-/// shared with the user, what it is and Leave list.
+/// Add or edit a list (the kit's editor): its name, colour and sharing; or,
+/// for a list someone shared with the user, a card with Leave list.
 fn list_sheet(sheet: Value, root: &adw::ApplicationWindow, sender: &ComponentSender<Tasks>) {
     let id = opt(&sheet, "id");
     if let Some(from) = sheet["from"].as_object() {
         let who = from.get("name").and_then(Value::as_str).unwrap_or_default();
         let can = if sheet["canWrite"] == json!(true) { "You can both change it." } else { "You can view it, but not change it." };
-        let tx = sender.clone();
-        let d = uuob_kit_gtk::confirm_sheet(s(&sheet, "name"), &format!("{who} shares this list with you. {can}"), &[("Leave list", &["danger"], "leave"), ("Done", &["primary"], "done")], false, move |r| {
-            if let (Some(id), "leave") = (&id, r) {
+        let (d, body) = uuob_kit_gtk::detail_sheet(s(&sheet, "name"), &[]);
+        let rows = gtk::Box::builder().orientation(gtk::Orientation::Vertical).margin_top(6).css_classes(["icon-rows"]).build();
+        let r = uuob_kit_gtk::icon_row(Some("people"), &label(&format!("{who} shares this list with you. {can}"), &["card-line"]));
+        r.add_css_class("last");
+        rows.append(&r);
+        body.append(&rows);
+        let leave = uuob_kit_gtk::btn("Leave list", None, &["danger"]);
+        leave.set_halign(gtk::Align::Start);
+        leave.set_margin_top(18);
+        let (tx, dd) = (sender.clone(), d.clone());
+        leave.connect_clicked(move |_| {
+            dd.close();
+            if let Some(id) = &id {
                 tx.input(Msg::DeleteList(id.clone()));
             }
         });
+        body.append(&leave);
         d.present(Some(root));
         return;
     }
-    let dialog = adw::Dialog::builder().title(if id.is_some() { "Edit list" } else { "New list" }).content_width(380).build();
-    let col = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(14).margin_top(6).margin_bottom(22).margin_start(22).margin_end(22).build();
     let color = Rc::new(std::cell::RefCell::new(s(&sheet, "color").to_string()));
-    let hero = gtk::Box::builder().halign(gtk::Align::Center).css_classes(["hero", "circle", &format!("uuob-c-{}", color.borrow())]).build();
-    let hi = uuob_kit_gtk::icon("list", 30, 2.4, "#ffffff");
-    hi.set_hexpand(true);
-    hi.set_halign(gtk::Align::Center);
-    hero.append(&hi);
-    hero.set_hexpand(false);
-    col.append(&hero);
-    let name = gtk::Entry::builder().placeholder_text("List name").text(s(&sheet, "name")).xalign(0.5).css_classes(["field", "name-field"]).build();
-    col.append(&name);
-    let swatches = gtk::Box::builder().spacing(12).halign(gtk::Align::Center).build();
+    let title_cell: Rc<std::cell::OnceCell<gtk::Entry>> = Rc::new(std::cell::OnceCell::new());
+    let on_save = {
+        let (tx, color, sheet, title_cell) = (sender.clone(), color.clone(), sheet.clone(), title_cell.clone());
+        move || {
+            let n = title_cell.get().map(|e| e.text().trim().to_string()).unwrap_or_default();
+            if n.is_empty() {
+                return false;
+            }
+            let mut out = sheet.clone();
+            out["name"] = json!(n);
+            out["color"] = json!(*color.borrow());
+            tx.input(Msg::SaveList(out));
+            true
+        }
+    };
+    let on_delete: Option<Box<dyn Fn()>> = id.clone().map(|id| {
+        let tx = sender.clone();
+        Box::new(move || tx.input(Msg::DeleteList(id.clone()))) as Box<dyn Fn()>
+    });
+    let es = uuob_kit_gtk::edit_sheet("List name", s(&sheet, "name"), id.is_none(), on_save, on_delete);
+    let _ = title_cell.set(es.title.clone());
+    es.save.set_label(if id.is_some() { "Save" } else { "Create" });
+    es.save.set_sensitive(!s(&sheet, "name").trim().is_empty());
+    let sv = es.save.clone();
+    es.title.connect_changed(move |e| sv.set_sensitive(!e.text().trim().is_empty()));
+    uuob_kit_gtk::set_tint(&es.dialog, Some(&color.borrow()));
+    let rows = gtk::Box::builder().orientation(gtk::Orientation::Vertical).css_classes(["icon-rows"]).build();
+    let swatches = gtk::Box::builder().spacing(10).margin_top(8).margin_bottom(8).build();
     let buttons: Rc<Vec<(&str, gtk::Button)>> = Rc::new(
         uuob_kit_gtk::COLORS
             .iter()
@@ -530,68 +642,34 @@ fn list_sheet(sheet: Value, root: &adw::ApplicationWindow, sender: &ComponentSen
             .collect(),
     );
     for (c, b) in buttons.iter() {
-        let (color, hero, all, c) = (color.clone(), hero.clone(), buttons.clone(), *c);
+        let (color, all, c, d) = (color.clone(), buttons.clone(), *c, es.dialog.clone());
         b.connect_clicked(move |_| {
-            hero.remove_css_class(&format!("uuob-c-{}", color.borrow()));
             *color.borrow_mut() = c.to_string();
-            hero.add_css_class(&format!("uuob-c-{c}"));
+            uuob_kit_gtk::set_tint(&d, Some(c));
             for (k, b) in all.iter() {
                 if *k == c { b.add_css_class("on") } else { b.remove_css_class("on") }
             }
         });
     }
-    col.append(&swatches);
+    let colour_row = uuob_kit_gtk::icon_row(Some("list"), &swatches);
+    rows.append(&colour_row);
     if let Some(id) = &id {
         let shared = sheet["sharedWith"].as_array().is_some_and(|a| !a.is_empty());
-        let share = uuob_kit_gtk::btn(if shared { s(&sheet, "note") } else { "Share list…" }, Some("share"), &["ghost"]);
-        let (tx, id, d) = (sender.clone(), id.clone(), dialog.clone());
+        let share = gtk::Button::builder().label(if shared { s(&sheet, "note") } else { "Share list…" }).halign(gtk::Align::Start).css_classes(["flat", "field"]).build();
+        let (tx, id, d) = (sender.clone(), id.clone(), es.dialog.clone());
         share.connect_clicked(move |_| {
             d.close();
             tx.input(Msg::Share(id.clone()));
         });
-        col.append(&share);
+        let r = uuob_kit_gtk::icon_row(Some("share"), &share);
+        r.add_css_class("last");
+        rows.append(&r);
+    } else {
+        colour_row.add_css_class("last");
     }
-    let actions = gtk::Box::builder().spacing(10).homogeneous(true).margin_top(8).build();
-    let left = uuob_kit_gtk::btn(if id.is_some() { "Delete" } else { "Cancel" }, None, &["lg"]);
-    if id.is_some() {
-        left.add_css_class("danger");
-    }
-    let save = uuob_kit_gtk::btn(if id.is_some() { "Save" } else { "Create" }, None, &["lg", "primary"]);
-    save.set_sensitive(!s(&sheet, "name").trim().is_empty());
-    let sv = save.clone();
-    name.connect_changed(move |e| sv.set_sensitive(!e.text().trim().is_empty()));
-    let (tx, d, del) = (sender.clone(), dialog.clone(), id.clone());
-    left.connect_clicked(move |_| {
-        d.close();
-        if let Some(id) = &del {
-            tx.input(Msg::DeleteList(id.clone()));
-        }
-    });
-    let submit = {
-        let (tx, d, name, color, sheet) = (sender.clone(), dialog.clone(), name.clone(), color.clone(), sheet.clone());
-        Rc::new(move || {
-            let n = name.text().trim().to_string();
-            if n.is_empty() {
-                return;
-            }
-            let mut out = sheet.clone();
-            out["name"] = json!(n);
-            out["color"] = json!(*color.borrow());
-            d.close();
-            tx.input(Msg::SaveList(out));
-        })
-    };
-    let sb = submit.clone();
-    save.connect_clicked(move |_| sb());
-    name.connect_activate(move |_| submit());
-    actions.append(&left);
-    actions.append(&save);
-    col.append(&actions);
-    let view = adw::ToolbarView::new();
-    view.add_top_bar(&adw::HeaderBar::new());
-    view.set_content(Some(&col));
-    dialog.set_child(Some(&view));
-    dialog.present(Some(root));
+    es.body.append(&rows);
+    es.dialog.present(Some(root));
+    es.title.grab_focus();
 }
 
 impl relm4::Component for Tasks {
@@ -611,49 +689,48 @@ impl relm4::Component for Tasks {
         style();
         let info = AppInfo { id: "tasks".into(), name: "Tasks".into(), noun: "tasks".into(), icon: "object-select-symbolic".into(), color: "blue".into(), version: core::version() };
 
-        // The sidebar: smart views, lists, Settings.
-        let smart = gtk::Grid::builder().column_spacing(10).row_spacing(10).column_homogeneous(true).build();
-        let lists = gtk::ListBox::builder().css_classes(["navigation-sidebar", "lists"]).selection_mode(gtk::SelectionMode::None).build();
+        // The sidebar (the kit's): the views and lists, New list, Settings.
+        let side_rows = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).build();
+        let new_list = uuob_kit_gtk::sidebar_row(Some(uuob_kit_gtk::icon("plus", 18, 2.0, "text2").upcast_ref()), "New list", None, false);
+        new_list.set_margin_top(6);
         let tx = sender.clone();
-        lists.connect_row_activated(move |_, r| tx.input(Msg::Go(r.widget_name().to_string())));
-        let hint = gtk::Label::builder().label("Group tasks into lists like Home, Work or Groceries.").wrap(true).xalign(0.0).margin_start(8).css_classes(["caption", "dim-label"]).build();
-        let add_list = uuob_kit_gtk::btn("Add list", Some("plus"), &["ghost"]);
-        add_list.set_halign(gtk::Align::Start);
-        let tx = sender.clone();
-        add_list.connect_clicked(move |_| tx.input(Msg::NewList));
-        let settings = gtk::Button::builder().child(&icon_label("settings", "Settings")).css_classes(["btn", "ghost", "settings-btn"]).halign(gtk::Align::Start).valign(gtk::Align::End).vexpand(true).build();
+        new_list.connect_clicked(move |_| tx.input(Msg::NewList));
+        let settings = uuob_kit_gtk::sidebar_row(Some(uuob_kit_gtk::icon("settings", 19, 1.75, "text2").upcast_ref()), "Settings", None, false);
+        settings.set_valign(gtk::Align::End);
+        settings.set_vexpand(true);
         let tx = sender.clone();
         settings.connect_clicked(move |_| tx.input(Msg::Settings));
-        let side = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).css_classes(["sidebar-col"]).build();
-        // On phones the overview has its own large title, as on the web.
-        let side_title = gtk::Label::builder().label("Tasks").xalign(0.0).visible(false).margin_bottom(18).css_classes(["large-title", "narrow-title"]).build();
-        side.append(&side_title);
-        side.append(&smart);
-        side.append(&gtk::Label::builder().label("MY LISTS").xalign(0.0).css_classes(["caption-heading", "dim-label", "lists-label"]).build());
-        side.append(&lists);
-        side.append(&hint);
-        side.append(&add_list);
+        let side = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).vexpand(true).css_classes(["side-col"]).build();
+        side.append(&side_rows);
+        side.append(&new_list);
         side.append(&settings);
-        let side_scroll = gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).child(&side).build();
-        let side_header = adw::HeaderBar::builder().show_title(false).build();
-        side_header.pack_start(&uuob_kit_gtk::update_button(FEED, info.version.clone()));
         let side_view = adw::ToolbarView::new();
-        side_view.add_top_bar(&side_header);
-        side_view.set_content(Some(&side_scroll));
-        let side_page = adw::NavigationPage::builder().title("Tasks").child(&side_view).build();
+        // The window's buttons once, on the content's side.
+        let sh = adw::HeaderBar::builder().show_title(false).show_end_title_buttons(false).build();
+        sh.pack_start(&uuob_kit_gtk::update_button(FEED, info.version.clone()));
+        side_view.add_top_bar(&sh);
+        side_view.set_content(Some(&gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).child(&side).build()));
+        // Folded: the views' and lists' circles, New list, Settings.
+        let rail = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).margin_top(12).vexpand(true).build();
+        let rail_rows = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).build();
+        rail.append(&rail_rows);
+        let rail_add = uuob_kit_gtk::rail_icon("plus", "New list", false);
+        let tx = sender.clone();
+        rail_add.connect_clicked(move |_| tx.input(Msg::NewList));
+        rail.append(&rail_add);
+        let rail_settings = uuob_kit_gtk::rail_icon("settings", "Settings (Ctrl+,)", false);
+        rail_settings.set_vexpand(true);
+        rail_settings.set_valign(gtk::Align::End);
+        let tx = sender.clone();
+        rail_settings.connect_clicked(move |_| tx.input(Msg::Settings));
+        rail.append(&rail_settings);
 
-        // The view or list shown.
-        let title = gtk::Label::builder().xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).css_classes(["large-title"]).build();
-        let edit = uuob_kit_gtk::icon_btn("edit", 18, "Edit list");
+        // The view or list shown: the toolbar (name and count, Edit, Share), the quick field, the tasks.
+        let edit = uuob_kit_gtk::icon_btn("edit", 19, "Edit list");
         edit.set_visible(false);
-        let share = uuob_kit_gtk::icon_btn("share", 18, "Share list");
+        let share = uuob_kit_gtk::icon_btn("share", 19, "Share list");
         share.set_visible(false);
-        let count = gtk::Label::builder().hexpand(true).xalign(1.0).css_classes(["count-title"]).build();
-        let head = gtk::Box::builder().spacing(6).build();
-        head.append(&title);
-        head.append(&edit);
-        head.append(&share);
-        head.append(&count);
+        let (bar, title) = uuob_kit_gtk::toolbar("", false, &[edit.clone().upcast(), share.clone().upcast()], None);
         let tx = sender.clone();
         edit.connect_clicked(move |_| tx.input(Msg::EditList));
         let tx = sender.clone();
@@ -662,7 +739,9 @@ impl relm4::Component for Tasks {
         let quick = gtk::Entry::builder().placeholder_text("New task — try “call mom fri 5pm”").hexpand(true).build();
         let preview = gtk::Label::builder().css_classes(["preview"]).visible(false).valign(gtk::Align::Center).build();
         let quick_row = gtk::Box::builder().spacing(6).css_classes(["quick"]).build();
-        quick_row.append(&uuob_kit_gtk::icon("plus", 20, 2.2, "accent"));
+        let plus = uuob_kit_gtk::icon("plus", 20, 2.2, "accent");
+        plus.add_css_class("uuob-tint-fg");
+        quick_row.append(&plus);
         quick_row.append(&quick);
         quick_row.append(&preview);
         let (p, c) = (preview.clone(), client.clone());
@@ -682,29 +761,61 @@ impl relm4::Component for Tasks {
         });
         let groups = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
         let main = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).css_classes(["main-col"]).build();
-        main.append(&head);
+        main.append(&bar);
         main.append(&note);
         main.append(&quick_row);
         main.append(&groups);
         let clamp = adw::Clamp::builder().maximum_size(760).child(&main).build();
         let main_scroll = gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).child(&clamp).build();
         let main_view = adw::ToolbarView::new();
-        main_view.add_top_bar(&adw::HeaderBar::builder().show_title(false).build());
+        main_view.add_top_bar(&adw::HeaderBar::builder().show_title(false).show_start_title_buttons(false).build());
         main_view.set_content(Some(&main_scroll));
-        let content_page = adw::NavigationPage::builder().title("Today").child(&main_view).build();
 
-        let split = adw::NavigationSplitView::builder().sidebar(&side_page).content(&content_page).min_sidebar_width(290.0).max_sidebar_width(320.0).build();
-        // Phones and narrow windows: the overview, then a list.
+        let scaffold = uuob_kit_gtk::SidebarScaffold::new("tasks", &side_view, &rail, &main_view);
+        // Narrow windows: a smaller title and margins.
         let narrow = adw::Breakpoint::new(adw::BreakpointCondition::parse("max-width: 720sp").expect("condition"));
-        narrow.add_setter(&split, "collapsed", Some(&true.to_value()));
-        narrow.add_setter(&side_title, "visible", Some(&true.to_value()));
+        {
+            let (t, m) = (title.clone(), main.clone());
+            narrow.connect_apply(move |_| {
+                t.add_css_class("compact");
+                m.add_css_class("narrow");
+            });
+            let (t, m) = (title.clone(), main.clone());
+            narrow.connect_unapply(move |_| {
+                t.remove_css_class("compact");
+                m.remove_css_class("narrow");
+            });
+        }
         root.add_breakpoint(narrow);
 
         let gate = Gate::new(info.clone(), client.clone(), {
             let tx = sender.clone();
             move || tx.input(Msg::Reload)
         });
-        gate.set_content(&split);
+        gate.set_content(&scaffold.widget());
+        // The shared shortcuts (docs/design.md) and Tasks' own: New list, the four views.
+        {
+            let m = |msg: fn() -> Msg| -> Rc<dyn Fn()> {
+                let tx = sender.clone();
+                Rc::new(move || tx.input(msg()))
+            };
+            let mut extra: Vec<(String, String, Rc<dyn Fn()>)> = vec![("New list".into(), "<Control><Shift>n".into(), m(|| Msg::NewList))];
+            for (i, (name, id)) in [("Today", "today"), ("Upcoming", "upcoming"), ("All", "all"), ("Completed", "completed")].into_iter().enumerate() {
+                let tx = sender.clone();
+                extra.push((name.into(), format!("<Control>{}", i + 1), Rc::new(move || tx.input(Msg::Go(id.into())))));
+            }
+            uuob_kit_gtk::Shortcuts {
+                settings: Some(m(|| Msg::Settings)),
+                new: Some(("New task".into(), m(|| Msg::NewTask))),
+                find: None,
+                toggle_sidebar: Some(scaffold.toggler()),
+                refresh: Some(m(|| Msg::Reload)),
+                extra,
+            }
+            .install(root.upcast_ref());
+        }
+        let close_peek = scaffold.closer();
+        std::mem::forget(scaffold);
         root.set_content(Some(&gate.widget()));
         std::mem::forget(gate);
 
@@ -748,11 +859,10 @@ impl relm4::Component for Tasks {
             view: "today".into(),
             finishing: HashSet::new(),
             animate: HashSet::new(),
-            open_id: None,
             last: Value::Null,
             upcoming_gen: 0,
         };
-        let widgets = Widgets { split, smart, lists, hint, content_page, title, edit, share, count, note, quick, quick_row, groups };
+        let widgets = Widgets { side_rows, rail_rows, page: main_view.upcast(), title, edit, share, note, quick, quick_row, groups, close_peek };
         model.render(&widgets, &sender, true);
         ComponentParts { model, widgets }
     }
@@ -774,10 +884,26 @@ impl relm4::Component for Tasks {
             Msg::Redraw => force = true,
             Msg::Go(id) => {
                 self.view = id;
-                self.open_id = None;
-                w.split.set_show_content(true);
                 w.quick.set_text("");
                 force = true;
+            }
+            Msg::NewTask => {
+                // A view without the field (Completed): Today, where it is.
+                if self.last["current"]["canAdd"] != json!(true) {
+                    self.view = "today".into();
+                    self.render(w, &sender, true);
+                }
+                (w.close_peek)();
+                w.quick.grab_focus();
+                return;
+            }
+            Msg::Card(x) => {
+                self.show_card(&x, root, &sender);
+                return;
+            }
+            Msg::Edit(x) => {
+                self.show_editor(&x, root, &sender);
+                return;
             }
             Msg::Add(text) => {
                 let record = core::quick_task_on(&text, &self.view, &dates::today(), now_ms());
@@ -804,26 +930,13 @@ impl relm4::Component for Tasks {
                     let tx = sender.clone();
                     glib::timeout_add_local_once(std::time::Duration::from_millis(700), move || tx.input(Msg::Finished(id)));
                 }
-                sender.input(Msg::Save(next, false));
+                sender.input(Msg::Save(next));
                 return;
             }
             Msg::Finished(id) => {
                 self.finishing.remove(&id);
             }
-            Msg::Set(x, field, value, quiet) => {
-                // Only a task still there (an editor's text must not bring back a deleted or moved one).
-                if !self.tasks.iter().any(|t| t["id"] == x["id"] && t["container"] == x["container"]) {
-                    return;
-                }
-                let mut y = self.current(&x);
-                if y[field] == value || (y[field].is_null() && value == json!("")) {
-                    return;
-                }
-                y[field] = value;
-                sender.input(Msg::Save(y, quiet));
-                return;
-            }
-            Msg::Save(x, quiet) => {
+            Msg::Save(x) => {
                 for t in self.tasks.iter_mut() {
                     if t["id"] == x["id"] && t["container"] == x["container"] {
                         *t = x.clone();
@@ -835,16 +948,19 @@ impl relm4::Component for Tasks {
                     let _ = client.put("tasks", c.as_deref(), None, record).await;
                     Cmd::Done
                 });
-                if quiet {
-                    // The editor shows it already: remember it as drawn.
-                    self.last = self.screen();
-                    self.schedule_upcoming(&sender);
-                    return;
+            }
+            Msg::SaveMove(x, list) => {
+                // Kept as edited here; the move stores it once, in its new list.
+                for t in self.tasks.iter_mut() {
+                    if t["id"] == x["id"] && t["container"] == x["container"] {
+                        *t = x.clone();
+                    }
                 }
+                sender.input(Msg::Move(x, list));
+                return;
             }
             Msg::Remove(x) => {
                 let x = self.current(&x);
-                self.open_id = None;
                 self.tasks.retain(|t| !(t["id"] == x["id"] && t["container"] == x["container"]));
                 let c = self.arg(x["container"].as_str());
                 let id = s(&x, "id").to_string();
@@ -877,10 +993,6 @@ impl relm4::Component for Tasks {
                     }
                     Cmd::Done
                 });
-                force = true;
-            }
-            Msg::Open(id) => {
-                self.open_id = id;
                 force = true;
             }
             Msg::NewList => {
@@ -950,7 +1062,7 @@ impl relm4::Component for Tasks {
             Msg::Settings => {
                 let tx = sender.clone();
                 let row = uuob_kit_gtk::choice_row("At a task's time", &["On", "Off"], if self.alerts { 0 } else { 1 }, move |i| tx.input(Msg::SetAlerts(i == 0)));
-                let group = uuob_kit_gtk::group("Alerts", "For tasks with a time. They ring on your phones and computers, as Tasks notifications.", vec![row]);
+                let group = uuob_kit_gtk::group("Alerts", "", vec![row]);
                 let tx = sender.clone();
                 let dialog = uuob_kit_gtk::settings_dialog(&self.info, &self.client, false, vec![group], move || tx.input(Msg::Redraw));
                 dialog.present(Some(root));

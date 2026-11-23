@@ -1,5 +1,25 @@
 package app.uuob.tasks
 
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import app.uuob.kit.DetailSheet
+import app.uuob.kit.EditSheet
+import app.uuob.kit.EmptyState
+import app.uuob.kit.IconRow
+import app.uuob.kit.RailButton
+import app.uuob.kit.RailIcon
+import app.uuob.kit.RowsLabel
+import app.uuob.kit.Shortcuts
+import app.uuob.kit.ShortcutsHost
+import app.uuob.kit.SidebarRow
+import app.uuob.kit.SidebarScaffold
+import app.uuob.kit.Toolbar
 import android.content.Context
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
@@ -141,9 +161,14 @@ class TasksModel(private val ctx: Context) {
   var tasksKnown by mutableStateOf(false)
   var alertsKnown by mutableStateOf(false)
   var view by mutableStateOf("today")
-  var mobileList by mutableStateOf(false)
+  /** The phone's drawer (the sidebar), open or not. */
+  var drawerOpen by mutableStateOf(false)
   var finishing by mutableStateOf(setOf<String>())
-  var openId by mutableStateOf<String?>(null)
+  /** The task whose card is shown, and the one being edited (as the screen drew them). */
+  var card by mutableStateOf<JSONObject?>(null)
+  var editing by mutableStateOf<JSONObject?>(null)
+  /** Asks the quick field for the keyboard (New task: Ctrl+N or C). */
+  var quickFocus by mutableIntStateOf(0)
   var listSheet by mutableStateOf<JSONObject?>(null)
   var settingsOpen by mutableStateOf(false)
   var hourTick by mutableIntStateOf(0)
@@ -204,8 +229,14 @@ class TasksModel(private val ctx: Context) {
 
   fun go(id: String) {
     view = id
-    openId = null
-    mobileList = true
+    drawerOpen = false
+  }
+
+  /** New task: the quick field, ready for typing (Today, where a view has none). */
+  fun newTask() {
+    if (!screen.getJSONObject("current").optBoolean("canAdd")) view = "today"
+    drawerOpen = false
+    quickFocus++
   }
 
   fun add(text: String, currentList: String?) {
@@ -236,7 +267,8 @@ class TasksModel(private val ctx: Context) {
   }
 
   fun remove(x: JSONObject) {
-    openId = null
+    card = null
+    editing = null
     val id = x.optString("id")
     tasks = JSONArray(objects(tasks).filter { it.optString("id") != id }).toString()
     Uuob.scope.launch { runCatching { client.delete("tasks", containerArg(x.text("container")), id) } }
@@ -278,7 +310,6 @@ class TasksModel(private val ctx: Context) {
           info.put("created", System.currentTimeMillis())
           client.put("list", list, "info", info.toString())
           view = list
-          mobileList = true
         }
       }
     }
@@ -314,21 +345,17 @@ fun TasksScreen(model: TasksModel, updater: Updater) {
     runCatching { Uuob.client.upcoming(model.upcomingList()) }
   }
   val s = model.screen
-  // The list or view on screen lends its colour to everything in it: pluses, ticks, the field's edge.
+  // The list or view on screen lends its colour to everything in it: pluses, ticks, the field's edge, Save.
   val shown = s.optJSONObject("current")?.optString("color")
   val accent = if (shown.isNullOrEmpty() || shown == "gray") MaterialTheme.colorScheme.primary else Colors.of(shown)
-  BoxWithConstraints(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-    val wide = maxWidth >= 720.dp
-    if (wide) {
-      Row(Modifier.fillMaxSize()) {
-        Box(Modifier.width(290.dp).fillMaxHeight().background(MaterialTheme.colorScheme.surface)) { Sidebar(model, s, wide, updater) }
-        Box(Modifier.width(1.dp).fillMaxHeight().background(Tokens.line))
-        Accent(accent) { MainList(model, s, wide) }
-      }
-    } else {
-      BackHandler(model.mobileList) { model.mobileList = false }
-      if (model.mobileList) Accent(accent) { MainList(model, s, wide) } else Sidebar(model, s, wide, updater)
+  ShortcutsHost(tasksShortcuts(model)) {
+    SidebarScaffold(model.drawerOpen, { model.drawerOpen = it }, sidebar = { Sidebar(model, s, updater, Modifier.weight(1f)) }, rail = { TasksRail(model, s) }) {
+      Accent(accent) { MainList(model, s) }
     }
+  }
+  Accent(accent) {
+    model.card?.let { TaskCard(model, it, s) }
+    model.editing?.let { TaskEditor(model, it, s) }
   }
   if (model.settingsOpen) {
     SettingsSheet(onClose = { model.settingsOpen = false }) {
@@ -339,6 +366,17 @@ fun TasksScreen(model: TasksModel, updater: Updater) {
   }
   model.listSheet?.let { sheet -> ListSheet(model, sheet) }
 }
+
+/** The keys (docs/design.md): the shared ones, New list, the four views. */
+private fun tasksShortcuts(model: TasksModel) = Shortcuts(
+  settings = { model.settingsOpen = true },
+  new = "New task" to { model.newTask() },
+  refresh = { Uuob.scope.launch { runCatching { model.reload() } } },
+  extra = listOf(Shortcuts.Extra("New list", "Ctrl+Shift+N", Key.N, ctrl = true, shift = true) { model.newList() }) +
+    listOf("Today" to "today", "Upcoming" to "upcoming", "All" to "all", "Completed" to "completed").zip(listOf(Key.One, Key.Two, Key.Three, Key.Four)).mapIndexed { i, (v, k) ->
+      Shortcuts.Extra(v.first, "Ctrl+${i + 1}", k, true) { model.go(v.second) }
+    },
+)
 
 /** A colour as the core names it ("gray" is `--text-2`). */
 @Composable
@@ -352,113 +390,101 @@ private fun Circle(color: Color, size: Int, icon: String, iconSize: Int, stroke:
   }
 }
 
+/** The sidebar (the kit's): the views, the lists, New list, Settings. */
 @Composable
-private fun Sidebar(model: TasksModel, s: JSONObject, wide: Boolean, updater: Updater) {
-  Column(Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 16.dp, vertical = if (wide) 28.dp else 24.dp)) {
-   Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-      if (!wide) LargeTitle("Tasks", Modifier.weight(1f)) else Spacer(Modifier.weight(1f))
+private fun Sidebar(model: TasksModel, s: JSONObject, updater: Updater, modifier: Modifier) {
+  Column(modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+    Row(Modifier.fillMaxWidth().padding(start = 10.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+      Text("Tasks", Modifier.weight(1f), fontSize = 22.sp, fontWeight = FontWeight.Bold)
       UpdateButton(updater)
     }
-    if (!wide) Spacer(Modifier.height(18.dp))
-    // The smart views, two by two.
-    objects(s.getJSONArray("smart").toString()).chunked(2).forEach { pair ->
-      Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(bottom = 10.dp)) {
-        pair.forEach { sm ->
-          val on = wide && model.view == sm.optString("id")
-          val src = remember { MutableInteractionSource() }
-          val pressed by src.collectIsPressedAsState()
-          val k by animateFloatAsState(if (pressed) 0.97f else 1f, label = "tile")
-          Column(
-            Modifier.weight(1f).scale(k).clip(RoundedCornerShape(14.dp))
-              .background(if (on) tint(sm.optString("color")).copy(alpha = if (Colors.dark) 0.16f else 0.12f) else MaterialTheme.colorScheme.surface)
-              .border(1.dp, if (on) tint(sm.optString("color")).copy(alpha = 0.5f) else Tokens.line, RoundedCornerShape(14.dp))
-              .clickable(src, null) { model.go(sm.optString("id")) }.padding(12.dp),
-          ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-              Circle(tint(sm.optString("color")), 30, sm.optString("icon"), 17)
-              Spacer(Modifier.weight(1f))
-              Text("${sm.optInt("count")}", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            }
-            Spacer(Modifier.height(8.dp))
-            Text(sm.optString("name"), fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = Tokens.text2)
-          }
-        }
+    objects(s.getJSONArray("smart").toString()).forEach { sm ->
+      SidebarRow(sm.optString("name"), model.view == sm.optString("id"), { model.go(sm.optString("id")) }, leading = { Circle(tint(sm.optString("color")), 22, sm.optString("icon"), 13) }) {
+        Text("${sm.optInt("count")}", fontSize = 14.sp)
       }
     }
-    SectionLabel("My lists", Modifier.padding(start = 8.dp, top = 16.dp, bottom = 8.dp))
     val lists = objects(s.getJSONArray("lists").toString())
+    if (lists.isNotEmpty()) RowsLabel("My lists", Modifier.padding(start = 10.dp, bottom = 4.dp))
     lists.forEach { l ->
-      val on = wide && model.view == l.optString("id")
-      Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
-          .background(if (on) Colors.of(l.optString("color")).copy(alpha = if (Colors.dark) 0.16f else 0.12f) else Color.Transparent)
-          .clickable { model.go(l.optString("id")) }.padding(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-      ) {
-        Circle(Colors.of(l.optString("color")), 26, "list", 14, 2.4f)
-        Text(l.optString("name"), fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+      SidebarRow(l.optString("name"), model.view == l.optString("id"), { model.go(l.optString("id")) }, leading = { Circle(Colors.of(l.optString("color")), 22, "list", 12, 2.4f) }) {
         if (l.optBoolean("shared")) Icon24("people", size = 15.dp, tint = Tokens.text3)
-        Text("${l.optInt("count")}", fontSize = 13.sp, color = Tokens.text2)
+        Text("${l.optInt("count")}", fontSize = 14.sp)
       }
     }
-    Btn("Add list", { model.newList() }, Modifier.padding(top = 8.dp), kind = BtnKind.Ghost, icon = "plus")
-   }
-    Row(Modifier.clip(Pill.shape).clickable { model.settingsOpen = true }.padding(horizontal = 10.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-      Icon24("settings", size = 19.dp, tint = Tokens.text2); Spacer(Modifier.width(8.dp)); Text("Settings", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = Tokens.text2)
-    }
+    Spacer(Modifier.height(4.dp))
+    SidebarRow("New list", onClick = { model.drawerOpen = false; model.newList() }, leading = { Icon24("plus", size = 18.dp, stroke = 2f, tint = Tokens.text2) })
   }
+  SidebarRow("Settings", onClick = { model.drawerOpen = false; model.settingsOpen = true }, leading = { Icon24("settings", size = 19.dp, tint = Tokens.text2) })
+}
+
+/** Folded on a tablet: the views' and lists' circles, New list, Settings. */
+@Composable
+private fun ColumnScope.TasksRail(model: TasksModel, s: JSONObject) {
+  Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), horizontalAlignment = Alignment.CenterHorizontally) {
+    objects(s.getJSONArray("smart").toString()).forEach { sm ->
+      RailButton(sm.optString("name"), model.view == sm.optString("id"), { model.go(sm.optString("id")) }) { Circle(tint(sm.optString("color")), 24, sm.optString("icon"), 14) }
+    }
+    val lists = objects(s.getJSONArray("lists").toString())
+    if (lists.isNotEmpty()) Box(Modifier.padding(vertical = 6.dp).width(28.dp).height(1.dp).background(Tokens.line))
+    lists.forEach { l ->
+      RailButton(l.optString("name"), model.view == l.optString("id"), { model.go(l.optString("id")) }) { Circle(Colors.of(l.optString("color")), 22, "list", 12, 2.4f) }
+    }
+    RailIcon("plus", "New list") { model.newList() }
+  }
+  RailIcon("settings", "Settings") { model.settingsOpen = true }
 }
 
 @Composable
-private fun MainList(model: TasksModel, s: JSONObject, wide: Boolean) {
+private fun MainList(model: TasksModel, s: JSONObject) {
   val current = s.getJSONObject("current")
   val list = current.optJSONObject("list")
   val groups = objects(s.getJSONArray("groups").toString())
-  LazyColumn(
-    Modifier.fillMaxSize().safeDrawingPadding().imePadding(),
-    contentPadding = PaddingValues(start = if (wide) 48.dp else 16.dp, end = if (wide) 48.dp else 16.dp, top = if (wide) 40.dp else 16.dp, bottom = 80.dp),
-    horizontalAlignment = Alignment.CenterHorizontally,
-  ) {
-    item(key = "header") {
-      Column(Modifier.widthIn(max = 760.dp).fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(bottom = 18.dp)) {
-          if (!wide) IconBtn("back", { model.mobileList = false }, Modifier.offset(x = (-8).dp))
+  BoxWithConstraints(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+    val phone = maxWidth < 600.dp
+    val wide = maxWidth >= 720.dp
+    LazyColumn(
+      Modifier.fillMaxSize().safeDrawingPadding().imePadding(),
+      contentPadding = PaddingValues(start = if (wide) 28.dp else 14.dp, end = if (wide) 28.dp else 14.dp, top = if (wide) 26.dp else 12.dp, bottom = 80.dp),
+      horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+      item(key = "header") {
+        Column(Modifier.widthIn(max = 760.dp).fillMaxWidth()) {
           val color = current.optString("color")
-          Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(
-              current.optString("name"), fontSize = if (wide) 34.sp else 30.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.8).sp,
-              color = if (color == "gray") MaterialTheme.colorScheme.onSurface else Colors.of(color),
-              maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
-            )
+          val title = buildAnnotatedString {
+            withStyle(SpanStyle(fontWeight = FontWeight.Bold, color = if (color == "gray") MaterialTheme.colorScheme.onSurface else Colors.of(color))) { append(current.optString("name")) }
+            withStyle(SpanStyle(fontWeight = FontWeight.Normal, color = Tokens.text3)) { append(" ${s.optInt("count")}") }
+          }
+          Toolbar(title, compact = !wide, menu = if (phone) ({ model.drawerOpen = true }) else null) {
             if (list != null) {
               val from = list.optJSONObject("from") != null
-              IconBtn(if (from) "people" else "edit", { model.listSheet = JSONObject(list.toString()) }, size = 18.dp)
-              if (!from) IconBtn("share", { model.share(list.optString("id")) }, size = 18.dp)
+              IconBtn(if (from) "people" else "edit", { model.listSheet = JSONObject(list.toString()) }, size = 19.dp, description = if (from) "About this list" else "Edit list")
+              if (!from) IconBtn("share", { model.share(list.optString("id")) }, size = 19.dp, description = "Share list")
             }
           }
-          Text("${s.optInt("count")}", fontSize = 34.sp, fontWeight = FontWeight.Bold, color = Tokens.text3)
+          val note = list?.optString("note").orEmpty()
+          if (note.isNotEmpty()) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 14.dp).offset(y = (-6).dp)) {
+              Icon24("people", size = 15.dp, tint = Tokens.text2); Spacer(Modifier.width(6.dp)); Text(note, fontSize = 13.sp, color = Tokens.text2)
+            }
+          }
+          if (current.optBoolean("canAdd")) QuickAdd(model, list?.optString("id"))
         }
-        val note = list?.optString("note").orEmpty()
-        if (note.isNotEmpty()) {
-          Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 14.dp).offset(y = (-6).dp)) {
-            Icon24("people", size = 15.dp, tint = Tokens.text2); Spacer(Modifier.width(6.dp)); Text(note, fontSize = 13.sp, color = Tokens.text2)
+      }
+      groups.forEach { g ->
+        val key = g.optString("key")
+        if (key.isNotEmpty()) item(key = "day-$key") {
+          Text(key, fontWeight = FontWeight.Bold, fontSize = 15.sp, modifier = Modifier.widthIn(max = 760.dp).fillMaxWidth().padding(start = 4.dp, top = 22.dp, bottom = 6.dp).animateItem())
+        }
+        val items = objects(g.getJSONArray("items").toString())
+        itemsIndexed(items, key = { _, it -> it.optString("container") + "/" + it.optString("id") }) { i, x ->
+          Column(Modifier.widthIn(max = 760.dp).fillMaxWidth().animateItem()) {
+            TaskRow(model, x)
+            if (i < items.size - 1) Box(Modifier.padding(start = 46.dp).fillMaxWidth().height(1.dp).background(Tokens.line))
           }
         }
-        if (current.optBoolean("canAdd")) QuickAdd(model, list?.optString("id"))
       }
+      s.optJSONObject("empty")?.let { e -> item(key = "empty") { EmptyState("check", e.optString("headline"), Modifier.animateItem()) } }
     }
-    groups.forEach { g ->
-      val key = g.optString("key")
-      if (key.isNotEmpty()) item(key = "day-$key") {
-        Text(key, fontWeight = FontWeight.Bold, fontSize = 15.sp, modifier = Modifier.widthIn(max = 760.dp).fillMaxWidth().padding(start = 4.dp, top = 22.dp, bottom = 6.dp).animateItem())
-      }
-      items(objects(g.getJSONArray("items").toString()), key = { it.optString("container") + "/" + it.optString("id") }) { x ->
-        Box(Modifier.widthIn(max = 760.dp).fillMaxWidth().animateItem()) { TaskRow(model, x, s) }
-      }
-    }
-    s.optJSONObject("empty")?.let { e -> item(key = "empty") { Empty(e.optString("glyph"), e.optString("headline"), "", Modifier.animateItem()) } }
   }
 }
 
@@ -469,6 +495,8 @@ private fun QuickAdd(model: TasksModel, list: String?) {
   val preview = if (draft.isBlank()) null else quickPreview(draft, UuobSettings.hour12)
   val src = remember { MutableInteractionSource() }
   val focused by src.collectIsFocusedAsState()
+  val focus = remember { FocusRequester() }
+  LaunchedEffect(model.quickFocus) { if (model.quickFocus > 0) runCatching { focus.requestFocus() } }
   Row(
     Modifier.fillMaxWidth().padding(bottom = 16.dp)
       .then(if (focused) Modifier.border(4.dp, Tokens.accentSoft, RoundedCornerShape(18.dp)).padding(4.dp) else Modifier)
@@ -479,7 +507,7 @@ private fun QuickAdd(model: TasksModel, list: String?) {
   ) {
     Icon24("plus", size = 20.dp, stroke = 2.2f, tint = MaterialTheme.colorScheme.primary)
     BasicTextField(
-      draft, { draft = it }, Modifier.weight(1f), singleLine = true, interactionSource = src,
+      draft, { draft = it }, Modifier.weight(1f).focusRequester(focus), singleLine = true, interactionSource = src,
       textStyle = TextStyle(fontSize = 17.sp, color = MaterialTheme.colorScheme.onSurface), cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
       keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
       keyboardActions = KeyboardActions(onDone = { if (draft.isNotBlank()) { model.add(draft, list); draft = "" } }),
@@ -493,76 +521,113 @@ private fun QuickAdd(model: TasksModel, list: String?) {
 }
 
 @Composable
-private fun TaskRow(model: TasksModel, x: JSONObject, s: JSONObject) {
+private fun TaskRow(model: TasksModel, x: JSONObject) {
   val show = x.getJSONObject("show")
-  val id = x.optString("id")
-  val open = model.openId == id
   val done = x.optBoolean("done")
   val canEdit = show.optBoolean("canEdit")
   val fade by animateFloatAsState(if (show.optBoolean("finishing")) 0.35f else 1f, tween(500, delayMillis = 250), label = "finish")
   val ring = if (show.isNull("ring")) null else Colors.of(show.optString("ring"))
-  val shape = RoundedCornerShape(14.dp)
-  Column(
-    Modifier.fillMaxWidth().alpha(fade).padding(vertical = if (open) 8.dp else 0.dp)
-      .then(if (open) Modifier.shadow(10.dp, shape, ambientColor = Color.Black.copy(alpha = 0.1f), spotColor = Color.Black.copy(alpha = 0.1f)) else Modifier)
-      .clip(shape).background(if (open) MaterialTheme.colorScheme.surface else Color.Transparent),
+  Row(
+    Modifier.fillMaxWidth().alpha(fade).clip(RoundedCornerShape(10.dp)).clickable { model.card = x }.padding(horizontal = 6.dp, vertical = 12.dp),
+    horizontalArrangement = Arrangement.spacedBy(14.dp),
   ) {
-    Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-      Check(done, ring ?: MaterialTheme.colorScheme.primary, { model.toggle(x) }, Modifier.padding(top = 1.dp), enabled = canEdit)
-      Column(Modifier.weight(1f).clickable(enabled = canEdit, indication = null, interactionSource = remember { MutableInteractionSource() }) { model.openId = if (open) null else id }, verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Text(x.optString("title"), fontSize = 17.sp, color = if (done) Tokens.text3 else MaterialTheme.colorScheme.onSurface, textDecoration = if (done) TextDecoration.LineThrough else null)
-        val notes = x.text("notes").orEmpty()
-        if (notes.isNotEmpty() && !open) Text(notes, fontSize = 14.sp, color = Tokens.text2, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        val whenText = show.text("when")
-        val listName = show.text("listName")
-        if (whenText != null || listName != null) {
-          Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            if (whenText != null) {
-              val late = show.optBoolean("late")
-              Text(whenText, fontSize = 14.sp, fontWeight = if (late) FontWeight.Medium else FontWeight.Normal, color = if (late) MaterialTheme.colorScheme.error else Tokens.text2)
-            }
-            if (listName != null) Text(listName, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Colors.of(show.text("listColor")))
+    Check(done, ring ?: MaterialTheme.colorScheme.primary, { model.toggle(x) }, Modifier.padding(top = 1.dp), enabled = canEdit)
+    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+      Text(x.optString("title"), fontSize = 17.sp, color = if (done) Tokens.text3 else MaterialTheme.colorScheme.onSurface, textDecoration = if (done) TextDecoration.LineThrough else null)
+      val notes = x.text("notes").orEmpty()
+      if (notes.isNotEmpty()) Text(notes, fontSize = 14.sp, color = Tokens.text2, maxLines = 1, overflow = TextOverflow.Ellipsis)
+      val whenText = show.text("when")
+      val listName = show.text("listName")
+      if (whenText != null || listName != null) {
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+          if (whenText != null) {
+            val late = show.optBoolean("late")
+            Text(whenText, fontSize = 14.sp, fontWeight = if (late) FontWeight.Medium else FontWeight.Normal, color = if (late) MaterialTheme.colorScheme.error else Tokens.text2)
           }
+          if (listName != null) Text(listName, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Colors.of(show.text("listColor")))
         }
       }
     }
-    AnimatedVisibility(open, enter = expandVertically(tween(200)) + fadeIn(), exit = shrinkVertically(tween(200)) + fadeOut()) { Editor(model, x, s) }
   }
 }
 
+/** The task's card (the kit's detail card): when, its list, notes; Edit, Delete, Complete. */
 @Composable
-private fun Editor(model: TasksModel, x: JSONObject, s: JSONObject) {
-  fun with(k: String, v: Any?) = JSONObject(x.toString()).put(k, v ?: JSONObject.NULL)
-  Column(Modifier.padding(start = 14.dp, end = 14.dp, bottom = 14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-    CommitField(x.optString("title"), "", single = true) { if (it != x.optString("title")) model.save(with("title", it)) }
-    CommitField(x.text("notes").orEmpty(), "Notes", single = false) { if (it != x.text("notes").orEmpty()) model.save(with("notes", it)) }
-    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-      Stack("Date", Modifier.weight(1f)) { DateField(x.text("due")) { model.save(with("due", it)) } }
-      Stack("Time", Modifier.weight(1f)) { TimeField(x.text("time"), { model.save(with("time", it)) }, Modifier.fillMaxWidth(), placeholder = "None", optional = true) }
+private fun TaskCard(model: TasksModel, x: JSONObject, s: JSONObject) {
+  val show = x.getJSONObject("show")
+  val canEdit = show.optBoolean("canEdit")
+  val close = { model.card = null }
+  val list = objects(s.getJSONArray("lists").toString()).firstOrNull { it.optString("id") == x.text("list") }
+  val notes = x.text("notes").orEmpty()
+  val rows = listOfNotNull(show.text("when")?.let { "when" }, list?.let { "list" }, notes.ifEmpty { null }?.let { "notes" })
+  DetailSheet(x.optString("title"), close, actions = { if (canEdit) IconBtn("edit", { model.card = null; model.editing = x }, size = 19.dp, description = "Edit") }) {
+    Spacer(Modifier.height(6.dp))
+    rows.forEachIndexed { i, r ->
+      val last = i == rows.size - 1
+      when (r) {
+        "when" -> IconRow("clock", last = last) {
+          val late = show.optBoolean("late")
+          Text(show.optString("when"), fontSize = 15.sp, color = if (late) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
+        }
+        "list" -> IconRow("list", last = last) {
+          Box(Modifier.size(10.dp).clip(CircleShape).background(Colors.of(list!!.optString("color"))))
+          Text(list!!.optString("name"), fontSize = 15.sp)
+        }
+        else -> IconRow("notes", last = last, top = true) { Text(notes, fontSize = 15.sp, modifier = Modifier.padding(vertical = 8.dp)) }
+      }
     }
-    val lists = objects(s.getJSONArray("lists").toString()).filter { it.optBoolean("canWrite") }
-    Stack("List") {
-      Select(listOf("" to "None") + lists.map { it.optString("id") to it.optString("name") }, x.text("list") ?: "") { v -> model.move(x, v.ifEmpty { null }) }
-    }
-    Row(Modifier.fillMaxWidth().padding(top = 4.dp)) {
-      Btn("Delete", { model.remove(x) }, kind = BtnKind.Danger, icon = "trash")
-      Spacer(Modifier.weight(1f))
-      Btn("Done", { model.openId = null })
+    if (canEdit) {
+      Row(Modifier.fillMaxWidth().padding(top = 18.dp), verticalAlignment = Alignment.CenterVertically) {
+        Btn("Delete", { model.remove(x) }, kind = BtnKind.Danger)
+        Spacer(Modifier.weight(1f))
+        Btn(if (x.optBoolean("done")) "Not done" else "Complete", { model.card = null; model.toggle(x) }, kind = BtnKind.Primary)
+      }
     }
   }
 }
 
-/** A `<select>`: the choice shown in a field, a menu to change it. */
+/** The task's editor (the kit's editor): the title, its list under it, notes, date, time. Nothing changes until Save. */
 @Composable
-private fun Select(options: List<Pair<String, String>>, current: String, onPick: (String) -> Unit) {
+private fun TaskEditor(model: TasksModel, x: JSONObject, s: JSONObject) {
+  var title by remember(x) { mutableStateOf(x.optString("title")) }
+  var notes by remember(x) { mutableStateOf(x.text("notes").orEmpty()) }
+  var due by remember(x) { mutableStateOf(x.text("due")) }
+  var time by remember(x) { mutableStateOf(x.text("time")) }
+  var list by remember(x) { mutableStateOf(x.text("list") ?: "") }
+  val lists = objects(s.getJSONArray("lists").toString()).filter { it.optBoolean("canWrite") }
+  val close = { model.editing = null }
+  EditSheet(
+    title, { title = it }, placeholder = "Task", canSave = title.isNotBlank(), onCancel = close,
+    onSave = {
+      val y = JSONObject(x.toString()).put("title", title.trim()).put("notes", notes).put("due", due ?: JSONObject.NULL).put("time", time ?: JSONObject.NULL)
+      model.editing = null
+      if (list != (x.text("list") ?: "")) model.move(y, list.ifEmpty { null }) else model.save(y)
+    },
+    onDelete = { model.remove(x) },
+    under = {
+      Icon24("list", size = 16.dp, tint = Tokens.text2)
+      Select(listOf("" to "No list") + lists.map { it.optString("id") to it.optString("name") }, list, plain = true) { list = it }
+    },
+  ) {
+    IconRow("notes", top = true) { WebField(notes, { notes = it }, Modifier.weight(1f), placeholder = "Notes", singleLine = false, minHeight = 46.dp, border = false, textStyle = TextStyle(fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)) }
+    IconRow("calendar") { DateField(due, plain = true) { due = it } }
+    IconRow("clock", last = true) { TimeField(time, { time = it }, Modifier.width(110.dp), placeholder = "No time", optional = true, plain = true, atStart = true); Spacer(Modifier.weight(1f)) }
+  }
+}
+
+/** A `<select>`: the choice shown in a field (or plain text), a menu to change it. */
+@Composable
+private fun Select(options: List<Pair<String, String>>, current: String, plain: Boolean = false, onPick: (String) -> Unit) {
   var menu by remember { mutableStateOf(false) }
   Box {
     Row(
-      Modifier.fillMaxWidth().height(46.dp).clip(Tokens.field).background(Tokens.surface2).border(1.dp, Tokens.line, Tokens.field).clickable { menu = true }.padding(horizontal = 14.dp),
+      (if (plain) Modifier.clip(RoundedCornerShape(8.dp)).clickable { menu = true }.padding(horizontal = 4.dp, vertical = 6.dp)
+      else Modifier.fillMaxWidth().height(46.dp).clip(Tokens.field).background(Tokens.surface2).border(1.dp, Tokens.line, Tokens.field).clickable { menu = true }.padding(horizontal = 14.dp)),
       verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-      Text(options.firstOrNull { it.first == current }?.second ?: "", Modifier.weight(1f), fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-      Icon24("chevron", Modifier.rotate(90f), size = 16.dp, tint = Tokens.text2)
+      Text(options.firstOrNull { it.first == current }?.second ?: "", if (plain) Modifier else Modifier.weight(1f), fontSize = 15.sp, fontWeight = if (plain) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1, overflow = TextOverflow.Ellipsis)
+      Icon24("chevron", Modifier.rotate(90f), size = 14.dp, tint = Tokens.text2)
     }
     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
       options.forEach { (v, l) -> DropdownMenuItem(text = { Text(l) }, onClick = { menu = false; onPick(v) }) }
@@ -570,43 +635,28 @@ private fun Select(options: List<Pair<String, String>>, current: String, onPick:
   }
 }
 
-/** A text field that saves when it is left (as `onchange` did). */
-@Composable
-private fun CommitField(value: String, placeholder: String, single: Boolean, onCommit: (String) -> Unit) {
-  var text by remember(value) { mutableStateOf(value) }
-  var focused by remember { mutableStateOf(false) }
-  // Closing the editor (Done, another task) keeps what was typed.
-  val latest by rememberUpdatedState(text)
-  val saved by rememberUpdatedState(value)
-  val commit by rememberUpdatedState(onCommit)
-  DisposableEffect(Unit) { onDispose { if (latest != saved) commit(latest) } }
-  WebField(
-    text, { text = it },
-    Modifier.onFocusChanged { if (focused && !it.isFocused) onCommit(text); focused = it.isFocused },
-    placeholder = placeholder, singleLine = single, minHeight = if (single) 46.dp else 90.dp,
-  )
-}
-
 /** A date, "YYYY-MM-DD" or none, picked from a calendar. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun DateField(value: String?, onChange: (String?) -> Unit) {
+private fun DateField(value: String?, plain: Boolean = false, onChange: (String?) -> Unit) {
   var picking by remember { mutableStateOf(false) }
   Box(
-    Modifier.fillMaxWidth().height(46.dp).clip(Tokens.field).background(Tokens.surface2).border(1.dp, Tokens.line, Tokens.field).clickable { picking = true }.padding(horizontal = 14.dp),
+    (if (plain) Modifier.fillMaxWidth().clickable { picking = true }.padding(vertical = 8.dp)
+    else Modifier.fillMaxWidth().height(46.dp).clip(Tokens.field).background(Tokens.surface2).border(1.dp, Tokens.line, Tokens.field).clickable { picking = true }.padding(horizontal = 14.dp)),
     contentAlignment = Alignment.CenterStart,
-  ) { Text(value?.let { app.uuob.client.friendlyDate(it) } ?: "None", fontSize = 15.sp, color = if (value == null) Tokens.text3 else MaterialTheme.colorScheme.onSurface, maxLines = 1) }
+  ) { Text(value?.let { app.uuob.client.friendlyDate(it) } ?: "No date", fontSize = 15.sp, color = if (value == null) Tokens.text3 else MaterialTheme.colorScheme.onSurface, maxLines = 1) }
   if (picking) {
     val millis = value?.let { LocalDate.parse(it).atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli() }
     val state = rememberDatePickerState(initialSelectedDateMillis = millis)
     DatePickerDialog(
       onDismissRequest = { picking = false },
       confirmButton = { TextButton(onClick = { picking = false; state.selectedDateMillis?.let { onChange(Instant.ofEpochMilli(it).atZone(ZoneOffset.UTC).toLocalDate().toString()) } }) { Text("OK") } },
-      dismissButton = { TextButton(onClick = { picking = false; onChange(null) }) { Text("None") } },
+      dismissButton = { TextButton(onClick = { picking = false; onChange(null) }) { Text("No date") } },
     ) { DatePicker(state) }
   }
 }
 
+/** Add or edit a list (the kit's editor): its name, colour and sharing; or, for a list someone shared, a card with Leave list. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ListSheet(model: TasksModel, start: JSONObject) {
@@ -614,48 +664,42 @@ private fun ListSheet(model: TasksModel, start: JSONObject) {
   var color by remember(start) { mutableStateOf(start.optString("color", "blue")) }
   val id = start.text("id")
   val from = start.optJSONObject("from")
-  // The sheet takes the colour being chosen, so the buttons show what the list will look like.
-  Accent(Colors.of(color)) { WebSheet({ model.listSheet = null }) {
-    Box(Modifier.fillMaxWidth().padding(bottom = 18.dp), contentAlignment = Alignment.Center) {
-      Box(Modifier.shadow(8.dp, CircleShape)) { Circle(Colors.of(color), 72, "list", 30, 2.4f) }
-    }
-    if (from != null) {
-      Text(name, fontSize = 22.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
-      Text(
-        "Shared by ${from.optString("name")}" + if (start.optBoolean("canWrite")) "" else " · view only",
-        color = Tokens.text2, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-      )
-      Row(Modifier.fillMaxWidth().padding(top = 22.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        Btn("Leave list", { model.deleteList(id!!) }, Modifier.weight(1f), kind = BtnKind.Danger, lg = true)
-        Btn("Done", { model.listSheet = null }, Modifier.weight(1f), kind = BtnKind.Primary, lg = true)
+  val close = { model.listSheet = null }
+  if (from != null) {
+    DetailSheet(name, close) {
+      Spacer(Modifier.height(6.dp))
+      IconRow("people", last = true) {
+        Text("${from.optString("name")} shares this list with you. " + if (start.optBoolean("canWrite")) "You can both change it." else "You can view it, but not change it.", fontSize = 15.sp)
       }
-      return@WebSheet
+      Btn("Leave list", { model.deleteList(id!!) }, Modifier.padding(top = 18.dp), kind = BtnKind.Danger)
     }
-    WebField(name, { name = it }, placeholder = "List name", minHeight = 54.dp, textStyle = TextStyle(fontSize = 20.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center))
-    FlowRow(Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-      COLORS.forEach { c ->
-        val on = c == color
-        Box(
-          Modifier.size(32.dp)
-            .then(if (on) Modifier.border(2.dp, Tokens.text2, CircleShape).padding(5.dp) else Modifier)
-            .clip(CircleShape).background(Colors.of(c)).clickable { color = c },
-        )
+    return
+  }
+  // The sheet takes the colour being chosen, so Save shows what the list will look like.
+  Accent(Colors.of(color)) {
+    EditSheet(
+      name, { name = it }, placeholder = "List name", isNew = id == null, canSave = name.isNotBlank(), onCancel = close,
+      onSave = { model.saveList(JSONObject(start.toString()).put("name", name).put("color", color)) },
+      onDelete = id?.let { { model.deleteList(it) } },
+    ) {
+      IconRow("list", last = id == null) {
+        FlowRow(Modifier.weight(1f).padding(vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+          COLORS.forEach { c ->
+            val on = c == color
+            Box(
+              Modifier.size(28.dp)
+                .then(if (on) Modifier.border(2.dp, Tokens.text2, CircleShape).padding(4.dp) else Modifier)
+                .clip(CircleShape).background(Colors.of(c)).clickable { color = c },
+            )
+          }
+        }
+      }
+      if (id != null) {
+        val shared = (start.optJSONArray("sharedWith")?.length() ?: 0) > 0
+        IconRow("share", Modifier.clickable { model.share(id) }, last = true) {
+          Text(if (shared) start.optString("note") else "Share list…", fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
       }
     }
-    if (id != null) {
-      val shared = (start.optJSONArray("sharedWith")?.length() ?: 0) > 0
-      Row(
-        Modifier.fillMaxWidth().padding(top = 18.dp).height(46.dp).clip(Pill.shape).background(Tokens.surface2).clickable { model.share(id) }.padding(horizontal = 18.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
-      ) {
-        Icon24("share", size = 18.dp, tint = MaterialTheme.colorScheme.primary)
-        Text(if (shared) start.optString("note") else "Share list…", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-      }
-    }
-    Row(Modifier.fillMaxWidth().padding(top = 22.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-      if (id != null) Btn("Delete", { model.deleteList(id) }, Modifier.weight(1f), kind = BtnKind.Danger, lg = true)
-      else Btn("Cancel", { model.listSheet = null }, Modifier.weight(1f), lg = true)
-      Btn(if (id != null) "Save" else "Create", { model.saveList(JSONObject(start.toString()).put("name", name).put("color", color)) }, Modifier.weight(1f), kind = BtnKind.Primary, lg = true, enabled = name.isNotBlank())
-    }
-  }}
+  }
 }
