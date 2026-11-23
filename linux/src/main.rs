@@ -695,15 +695,13 @@ impl relm4::Component for Tasks {
         new_list.set_margin_top(6);
         let tx = sender.clone();
         new_list.connect_clicked(move |_| tx.input(Msg::NewList));
+        // Settings goes on the toggle's line at the sidebar's foot (the kit's footer).
         let settings = uuob_kit_gtk::sidebar_row(Some(uuob_kit_gtk::icon("settings", 19, 1.75, "text2").upcast_ref()), "Settings", None, false);
-        settings.set_valign(gtk::Align::End);
-        settings.set_vexpand(true);
         let tx = sender.clone();
         settings.connect_clicked(move |_| tx.input(Msg::Settings));
         let side = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).vexpand(true).css_classes(["side-col"]).build();
         side.append(&side_rows);
         side.append(&new_list);
-        side.append(&settings);
         let side_view = adw::ToolbarView::new();
         // The window's buttons once, on the content's side.
         let sh = adw::HeaderBar::builder().show_title(false).show_end_title_buttons(false).build();
@@ -719,11 +717,8 @@ impl relm4::Component for Tasks {
         rail_add.connect_clicked(move |_| tx.input(Msg::NewList));
         rail.append(&rail_add);
         let rail_settings = uuob_kit_gtk::rail_icon("settings", "Settings (Ctrl+,)", false);
-        rail_settings.set_vexpand(true);
-        rail_settings.set_valign(gtk::Align::End);
         let tx = sender.clone();
         rail_settings.connect_clicked(move |_| tx.input(Msg::Settings));
-        rail.append(&rail_settings);
 
         // The view or list shown: the toolbar (name and count, Edit, Share), the quick field, the tasks.
         let edit = uuob_kit_gtk::icon_btn("edit", 19, "Edit list");
@@ -772,6 +767,8 @@ impl relm4::Component for Tasks {
         main_view.set_content(Some(&main_scroll));
 
         let scaffold = uuob_kit_gtk::SidebarScaffold::new("tasks", &side_view, &rail, &main_view);
+        scaffold.set_footer(&settings);
+        scaffold.set_rail_footer(&rail_settings);
         // Narrow windows: a smaller title and margins.
         let narrow = adw::Breakpoint::new(adw::BreakpointCondition::parse("max-width: 720sp").expect("condition"));
         {

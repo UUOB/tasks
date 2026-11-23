@@ -277,6 +277,10 @@ struct TasksView: View {
             TasksRail(model: model, s: s)
         } content: {
             MainList(model: model, s: s).uuobTint(tint)
+        } footer: {
+            SettingsFoot { model.settingsOpen = true }
+        } railFooter: {
+            RailButton("settings", help: "Settings (⌘,)") { model.settingsOpen = true }
         }
         // ⌘K, ⌘?, and C / ? where no field is typing (docs/design.md).
         .uuobKeys(TasksApp.commands(model))
@@ -337,7 +341,7 @@ struct Sidebar: View {
                             mark(Palette.color(l.color.string), "list", 22)
                         } trailing: {
                             HStack(spacing: 6) {
-                                if l.shared.bool { Ico("people", size: 14).help(l.note.string) }
+                                if l.shared.bool { Ico("people", size: 14).uuobHint(l.note.string) }
                                 Text("\(l.count.int)")
                             }
                         } action: { model.go(l.id); closePeek() }
@@ -347,7 +351,6 @@ struct Sidebar: View {
                 }
             }
             .scrollIndicators(.never)
-            SidebarRow(title: "Settings") { Ico("settings", size: 19).foregroundStyle(Look.text2) } action: { closePeek(); model.settingsOpen = true }
         }
         .padding(.horizontal, 12).padding(.top, 20).padding(.bottom, 4)
     }
@@ -370,7 +373,6 @@ struct TasksRail: View {
             }
             RailButton("plus", help: "New list (⇧⌘N)") { model.newList() }
             Spacer()
-            RailButton("settings", help: "Settings (⌘,)") { model.settingsOpen = true }
         }
         .padding(.top, 4)
     }
@@ -675,7 +677,7 @@ struct ListSheet: View {
                                             .overlay(Circle().strokeBorder(Look.elevated, lineWidth: c == color ? 3 : 0))
                                             .overlay(Circle().strokeBorder(Look.text2, lineWidth: c == color ? 2 : 0).padding(-4))
                                     }
-                                    .buttonStyle(PressStyle()).help(c)
+                                    .buttonStyle(PressStyle()).uuobHint(c)
                                 }
                             }
                             .padding(.vertical, 8)
@@ -695,5 +697,16 @@ struct ListSheet: View {
             name = start.name.string
             color = start.color.str ?? "blue"
         }
+    }
+}
+
+/// Settings on the toggle's line at the sidebar's foot; closes the sidebar
+/// shown over a narrow window first.
+struct SettingsFoot: View {
+    let open: () -> Void
+    @Environment(\.uuobClosePeek) private var closePeek
+    var body: some View {
+        SidebarRow(title: "Settings") { Ico("settings", size: 19).foregroundStyle(Look.text2) } action: { closePeek(); open() }
+            .uuobHint("Settings (⌘,)")
     }
 }

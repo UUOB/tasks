@@ -350,7 +350,9 @@ fun TasksScreen(model: TasksModel, updater: Updater) {
   val shown = s.optJSONObject("current")?.optString("color")
   val accent = if (shown.isNullOrEmpty() || shown == "gray") MaterialTheme.colorScheme.primary else Colors.of(shown)
   ShortcutsHost(tasksShortcuts(model)) {
-    SidebarScaffold(model.drawerOpen, { model.drawerOpen = it }, sidebar = { Sidebar(model, s, updater, Modifier.weight(1f)) }, rail = { TasksRail(model, s) }) {
+    SidebarScaffold(model.drawerOpen, { model.drawerOpen = it }, sidebar = { Sidebar(model, s, updater, Modifier.weight(1f)) }, rail = { TasksRail(model, s) }, footer = {
+      SidebarRow("Settings", onClick = { model.drawerOpen = false; model.settingsOpen = true }, leading = { Icon24("settings", size = 19.dp, tint = Tokens.text2) })
+    }) {
       Accent(accent) { MainList(model, s) }
     }
   }
@@ -412,7 +414,6 @@ private fun Sidebar(model: TasksModel, s: JSONObject, updater: Updater, modifier
     Spacer(Modifier.height(4.dp))
     SidebarRow("New list", onClick = { model.drawerOpen = false; model.newList() }, leading = { Icon24("plus", size = 18.dp, stroke = 2f, tint = Tokens.text2) })
   }
-  SidebarRow("Settings", onClick = { model.drawerOpen = false; model.settingsOpen = true }, leading = { Icon24("settings", size = 19.dp, tint = Tokens.text2) })
 }
 
 /** Folded on a tablet: the views' and lists' circles, New list, Settings. */
@@ -602,6 +603,7 @@ private fun TaskEditor(model: TasksModel, x: JSONObject, s: JSONObject) {
       if (list != (x.text("list") ?: "")) model.move(y, list.ifEmpty { null }) else model.save(y)
     },
     onDelete = { model.remove(x) },
+    dirty = title != x.optString("title") || notes != x.text("notes").orEmpty() || due != x.text("due") || time != x.text("time") || list != (x.text("list") ?: ""),
     under = {
       Icon24("list", size = 16.dp, tint = Tokens.text2)
       Select(listOf("" to "No list") + lists.map { it.optString("id") to it.optString("name") }, list, plain = true) { list = it }
@@ -679,6 +681,7 @@ private fun ListSheet(model: TasksModel, start: JSONObject) {
       name, { name = it }, placeholder = "List name", isNew = id == null, canSave = name.isNotBlank(), onCancel = close,
       onSave = { model.saveList(JSONObject(start.toString()).put("name", name).put("color", color)) },
       onDelete = id?.let { { model.deleteList(it) } },
+      dirty = name != start.optString("name") || color != start.optString("color", "blue"),
     ) {
       IconRow("list", last = id == null) {
         FlowRow(Modifier.weight(1f).padding(vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
