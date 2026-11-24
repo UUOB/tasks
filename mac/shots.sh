@@ -18,7 +18,8 @@ for mode in light dark; do
   click "~Work" && shot list
   click "~Send invoice" && { shot card; cmd e; shot editor; esc; esc; }
   # The side panel's foot: Settings and the toggle on one line, the toggle's hint.
-  hover "Hide sidebar (⌃⌘S)" && shot sidebar-hint
+  # The toggle's hint (an icon has no words to find; the window sits at 12,31, 1000 wide, 680 high).
+  pointer 222 681; sleep 1; shot sidebar-hint
   cmd ","; shot settings
   # Beside the sheet, on the window it covers (the screen is 1024 wide).
   win "click at {70, 640}"; sleep 1.5; shot outside-click
