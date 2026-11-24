@@ -21,8 +21,8 @@ for mode in light dark; do
   # The toggle's hint (an icon has no words to find; the window sits at 12,31, 1000 wide, 680 high).
   pointer 222 681; sleep 1; shot sidebar-hint
   cmd ","; shot settings
-  # Beside the sheet, on the window it covers (the screen is 1024 wide).
-  win "click at {70, 640}"; sleep 1.5; shot outside-click
+  # A real click beside the sheet, on the window it covers (the screen is 1024 wide).
+  pointer 70 600 left; sleep 1.5; shot outside-click
   esc
 done
 
